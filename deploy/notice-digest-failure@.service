@@ -1,0 +1,14 @@
+[Unit]
+Description=notice-digest 失败通知（%i 单元失败时发一封失败邮件）
+Documentation=file:/opt/notice-digest/docs/RUNBOOK.md
+
+[Service]
+Type=oneshot
+User=notice-digest
+Group=notice-digest
+WorkingDirectory=/opt/notice-digest
+EnvironmentFile=/opt/notice-digest/.env
+# %i = 触发本模板的失败单元名（由 OnFailure=notice-digest-failure@%n.service 传入，形如 notice-digest.service）
+ExecStart=/opt/notice-digest/.venv/bin/python -m notice_digest.cli notify-failure --unit %i --detail "systemd 报告该单元失败，详见 journalctl -u %i"
+# 失败邮件本身不成功也不应再触发新的失败单元（否则可能递归）
+Restart=no

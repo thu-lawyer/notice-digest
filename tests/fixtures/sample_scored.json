@@ -1,0 +1,360 @@
+{
+  "_comment": "render/mailer --selftest 用样例。now=2026-10-09 07:30（发送时刻），因此 tomorrow=2026-10-10、today=2026-10-09；刻意构造出与契约样例一致的主题「清华通知日报 10-09｜明日 3 场活动，1 项报名今日截止」。config 中的 secret/地址都是自检占位值，不是真实凭据。",
+  "now": "2026-10-09T07:30:00",
+  "config": {
+    "campus": "thu",
+    "db_path": "data/selftest-notice-digest.db",
+    "top_n": 8,
+    "send_at": "07:30",
+    "to_addr": "reader@example.com",
+    "from_addr": "digest@example.com",
+    "smtp_host": "smtp.example.com",
+    "smtp_port": 465,
+    "feedback_base": "https://feedback.example.com",
+    "hmac_secret": "selftest-placeholder-secret",
+    "weights_prior": {},
+    "keywords_boost": {},
+    "keywords_mute": [],
+    "source_boost": {},
+    "sections": ["今天/明天能去", "截止提醒", "本周讲座与学术", "实习就业", "其他新通知"]
+  },
+  "items": [
+    {
+      "score": 3.6,
+      "reasons": [["cat:讲座活动", 0.8], ["bucket:tomorrow", 0.6], ["kw:人工智能", 0.4]],
+      "item": {
+        "id": "thu:law-ai-forum-20261010",
+        "source_id": "src-law",
+        "source_name": "清华大学法学院",
+        "title": "人工智能与法律推理前沿问题学术报告会暨数字法治研究中心年度论坛（第七期）",
+        "published_at": "2026-10-08T09:12:00+08:00",
+        "url": "https://mp.weixin.qq.com/s/AAA1111",
+        "category": "讲座活动",
+        "intent_group": "activity",
+        "ai_summary": "由数字法治研究中心主办，邀请四位学者围绕大模型法律推理的可解释性、裁判说理的自动生成边界、检索增强与幻觉抑制、以及法学教育中的工具化使用展开报告，每位报告人 25 分钟、集中讨论 30 分钟，无需报名、先到先坐；活动免费向全校师生开放，建议提前十分钟入场，现场提供会议手册与研讨材料，报告摘要将于会后在学院网站发布。",
+        "ai_is_event": true,
+        "ai_event_time": "2026年10月10日（周六）14:00-16:00",
+        "ai_event_location": "法律图书馆 103",
+        "ai_time_evidence": "活动时间：10月10日（周六）14:00-16:00",
+        "ai_location_evidence": "地点：法律图书馆103",
+        "organizer": "清华大学法学院数字法治研究中心",
+        "ai_intent": "参加活动"
+      },
+      "parsed": {
+        "start": "2026-10-10T14:00:00",
+        "end": "2026-10-10T16:00:00",
+        "deadline": null,
+        "bucket": "tomorrow",
+        "evidence": "活动时间：10月10日（周六）14:00-16:00"
+      }
+    },
+    {
+      "score": 3.2,
+      "reasons": [["cat:讲座活动", 0.8], ["bucket:tomorrow", 0.6]],
+      "item": {
+        "id": "thu:civil-code-lecture-20261010",
+        "source_id": "src-law",
+        "source_name": "清华大学法学院",
+        "title": "《民法典》合同编通则司法解释理解与适用讲座",
+        "published_at": "2026-10-08T15:40:00+08:00",
+        "url": "https://mp.weixin.qq.com/s/BBB2222",
+        "category": "讲座活动",
+        "intent_group": "lecture",
+        "ai_summary": "结合合同编通则司法解释逐条梳理司法解释与法律适用的衔接问题，重点讲解认定合同成立、格式条款效力与违约责任的新增规则。",
+        "ai_is_event": true,
+        "ai_event_time": "10月10日 19:00",
+        "ai_event_location": "明理楼 214",
+        "ai_time_evidence": "时间：10月10日 19:00",
+        "organizer": "清华大学法学院研究生会",
+        "ai_intent": "参加活动"
+      },
+      "parsed": {
+        "start": "2026-10-10T19:00:00",
+        "end": null,
+        "deadline": null,
+        "bucket": "tomorrow",
+        "evidence": "时间：10月10日 19:00"
+      }
+    },
+    {
+      "score": 2.9,
+      "reasons": [["cat:文体活动", 0.5], ["bucket:tomorrow", 0.6]],
+      "item": {
+        "id": "thu:marathon-20261010",
+        "source_id": "src-sports",
+        "source_name": "清华大学学生会",
+        "title": "秋季校园马拉松集合与检录安排",
+        "published_at": "2026-10-08T11:00:00+08:00",
+        "url": "https://mp.weixin.qq.com/s/CCC3333",
+        "category": "文体活动",
+        "intent_group": "activity",
+        "ai_summary": "参赛者按号码分区检录，7:40 前完成存包，8:30 发枪。",
+        "ai_is_event": true,
+        "ai_event_time": "10月10日 8:30",
+        "ai_event_location": "东大操场",
+        "ai_time_evidence": "集合时间：10月10日 8:30",
+        "organizer": "清华大学体育部",
+        "ai_intent": "参加活动"
+      },
+      "parsed": {
+        "start": "2026-10-10T08:30:00",
+        "end": null,
+        "deadline": null,
+        "bucket": "tomorrow",
+        "evidence": "集合时间：10月10日 8:30"
+      }
+    },
+    {
+      "score": 2.6,
+      "reasons": [["deadline:today", 0.9], ["cat:奖助通知", 0.3]],
+      "item": {
+        "id": "thu:exchange-signup-20261009",
+        "source_id": "src-law",
+        "source_name": "清华大学法学院",
+        "title": "法学院国际交流项目报名通知（2027 春季学期）",
+        "published_at": "2026-10-07T10:20:00+08:00",
+        "url": "https://mp.weixin.qq.com/s/DDD4444",
+        "category": "奖助通知",
+        "intent_group": "notice",
+        "ai_summary": "面向研究生开放交换名额 6 人，需提交成绩单、语言成绩与学习计划，由学院统一面试选拔。",
+        "ai_is_event": false,
+        "ai_event_time": null,
+        "ai_event_location": null,
+        "ai_time_evidence": "报名截止：10月9日 17:00",
+        "organizer": "清华大学法学院外事办公室",
+        "ai_intent": "报名截止"
+      },
+      "parsed": {
+        "start": null,
+        "end": null,
+        "deadline": "2026-10-09T17:00:00",
+        "bucket": "today",
+        "evidence": "报名截止：10月9日 17:00"
+      }
+    },
+    {
+      "score": 2.4,
+      "reasons": [["cat:讲座活动", 0.8], ["bucket:this_week", 0.3]],
+      "item": {
+        "id": "thu:digital-law-3-20261012",
+        "source_id": "src-law",
+        "source_name": "清华大学法学院",
+        "title": "数字法治前沿系列讲座（第三讲）：算法治理的规范构造",
+        "published_at": "2026-10-08T08:00:00+08:00",
+        "url": "https://mp.weixin.qq.com/s/EEE5555",
+        "category": "讲座活动",
+        "intent_group": "lecture",
+        "ai_summary": "从规范构造角度讨论算法备案、算法审计与平台责任的制度设计，含二十分钟提问。",
+        "ai_is_event": true,
+        "ai_event_time": "10月12日 15:00",
+        "ai_event_location": "法律图书馆 412",
+        "ai_time_evidence": "时间：10月12日 15:00",
+        "organizer": "清华大学法学院",
+        "ai_intent": "参加活动"
+      },
+      "parsed": {
+        "start": "2026-10-12T15:00:00",
+        "end": null,
+        "deadline": null,
+        "bucket": "this_week",
+        "evidence": "时间：10月12日 15:00"
+      }
+    },
+    {
+      "score": 2.2,
+      "reasons": [["cat:讲座活动", 0.8], ["bucket:next_week", 0.2]],
+      "item": {
+        "id": "thu:criminal-procedure-seminar-20261016",
+        "source_id": "src-law",
+        "source_name": "清华大学法学院",
+        "title": "刑事诉讼法修改重点问题研讨会",
+        "published_at": "2026-10-08T17:30:00+08:00",
+        "url": "https://mp.weixin.qq.com/s/FFF6666",
+        "category": "讲座活动",
+        "intent_group": "lecture",
+        "ai_summary": "围绕强制措施体系、证据规则与涉案财物处置三个议题展开，需提前提交参会回执。",
+        "ai_is_event": true,
+        "ai_event_time": "10月16日 19:00",
+        "ai_event_location": "明理楼 501",
+        "ai_time_evidence": "会议时间：10月16日 19:00",
+        "organizer": "清华大学法学院",
+        "ai_intent": "参加活动"
+      },
+      "parsed": {
+        "start": "2026-10-16T19:00:00",
+        "end": null,
+        "deadline": null,
+        "bucket": "next_week",
+        "evidence": "会议时间：10月16日 19:00"
+      }
+    },
+    {
+      "score": 2.0,
+      "reasons": [["cat:就业实习", 0.7], ["kw:实习", 0.4]],
+      "item": {
+        "id": "thu:intern-talk-2026",
+        "source_id": "src-career",
+        "source_name": "清华大学学生职业发展指导中心",
+        "title": "互联网企业 2027 届法务与合规实习宣讲会",
+        "published_at": "2026-10-08T13:05:00+08:00",
+        "url": "https://mp.weixin.qq.com/s/GGG7777",
+        "category": "就业实习",
+        "intent_group": "career",
+        "ai_summary": "现场收取简历并安排一对一沟通，法务合规岗与政策研究岗共 20 个实习名额。",
+        "ai_is_event": true,
+        "ai_event_time": "以现场安排为准",
+        "ai_event_location": "学生职业发展指导中心 二层报告厅",
+        "ai_time_evidence": "宣讲时间以现场安排为准",
+        "organizer": "学生职业发展指导中心",
+        "ai_intent": "求职"
+      },
+      "parsed": {
+        "start": null,
+        "end": null,
+        "deadline": null,
+        "bucket": "undated",
+        "evidence": "宣讲时间以现场安排为准"
+      }
+    },
+    {
+      "score": 1.8,
+      "reasons": [["cat:招聘信息", 0.6], ["kw:招聘", 0.4]],
+      "item": {
+        "id": "thu:press-recruit-2026",
+        "source_id": "src-career",
+        "source_name": "中国政法大学出版社",
+        "title": "中国政法大学出版社法学编辑岗位招聘公告",
+        "published_at": "2026-10-08T10:10:00+08:00",
+        "url": "https://mp.weixin.qq.com/s/HHH8888",
+        "category": "招聘信息",
+        "intent_group": "career",
+        "ai_summary": "招聘法学编辑 3 名，要求法学硕士及以上，具备较强的文字编辑与选题策划能力，投递长期有效。",
+        "ai_is_event": false,
+        "ai_event_time": null,
+        "ai_event_location": null,
+        "ai_time_evidence": "投递长期有效",
+        "organizer": "中国政法大学出版社",
+        "ai_intent": "求职"
+      },
+      "parsed": {
+        "start": null,
+        "end": null,
+        "deadline": null,
+        "bucket": "undated",
+        "evidence": "投递长期有效"
+      }
+    },
+    {
+      "score": 1.5,
+      "reasons": [["cat:校园动态", 0.3]],
+      "item": {
+        "id": "thu:library-database-trial",
+        "source_id": "src-library",
+        "source_name": "清华大学图书馆",
+        "title": "图书馆新增数据库试用通知（时间待定）",
+        "published_at": "2026-10-08T16:00:00+08:00",
+        "url": "https://mp.weixin.qq.com/s/III9999",
+        "category": "校园动态",
+        "intent_group": "notice",
+        "ai_summary": "新增两个法学数据库的试用权限，校外访问需通过图书馆代理服务。",
+        "ai_is_event": false,
+        "ai_event_time": null,
+        "ai_event_location": null,
+        "ai_time_evidence": "具体开通时间以图书馆后续通知为准",
+        "organizer": "清华大学图书馆",
+        "ai_intent": "知悉"
+      },
+      "parsed": {
+        "start": null,
+        "end": null,
+        "deadline": null,
+        "bucket": "undated",
+        "evidence": "具体开通时间以图书馆后续通知为准"
+      }
+    },
+    {
+      "score": 1.3,
+      "reasons": [["cat:校园动态", 0.3]],
+      "item": {
+        "id": "thu:network-maintenance-20261010",
+        "source_id": "src-it",
+        "source_name": "清华大学信息化技术中心",
+        "title": "校园网出口设备维护通知",
+        "published_at": "2026-10-08T18:00:00+08:00",
+        "url": "https://mp.weixin.qq.com/s/JJJ0000",
+        "category": "校园动态",
+        "intent_group": "notice",
+        "ai_summary": "维护窗口内校外访问可能中断，如遇异常请联系信息中心 info&support 值班电话。",
+        "ai_is_event": false,
+        "ai_event_time": null,
+        "ai_event_location": null,
+        "ai_time_evidence": "维护时间：10月10日 00:00-06:00",
+        "organizer": "信息化技术中心",
+        "ai_intent": "知悉"
+      },
+      "parsed": {
+        "start": null,
+        "end": null,
+        "deadline": null,
+        "bucket": "undated",
+        "evidence": "维护时间：10月10日 00:00-06:00"
+      }
+    },
+    {
+      "score": 1.0,
+      "reasons": [["cat:校园动态", 0.3]],
+      "item": {
+        "id": "thu:canteen-menu-2026",
+        "source_id": "src-logistics",
+        "source_name": "清华大学饮食服务中心",
+        "title": "食堂菜品更新与营业时间调整",
+        "published_at": "2026-10-08T07:30:00+08:00",
+        "url": "https://mp.weixin.qq.com/s/KKK1111",
+        "category": "校园动态",
+        "intent_group": "notice",
+        "ai_summary": "部分窗口营业时间延后半小时，新增两个清真窗口。",
+        "ai_is_event": false,
+        "ai_event_time": null,
+        "ai_event_location": null,
+        "ai_time_evidence": "自即日起执行",
+        "organizer": "饮食服务中心",
+        "ai_intent": "知悉"
+      },
+      "parsed": {
+        "start": null,
+        "end": null,
+        "deadline": null,
+        "bucket": "undated",
+        "evidence": "自即日起执行"
+      }
+    },
+    {
+      "score": 0.8,
+      "reasons": [["cat:校园动态", 0.3]],
+      "item": {
+        "id": "thu:clinic-booking-2026",
+        "source_id": "src-clinic",
+        "source_name": "清华大学校医院",
+        "title": "校医院门诊预约方式变更",
+        "published_at": "2026-10-08T08:20:00+08:00",
+        "url": "https://mp.weixin.qq.com/s/LLL2222",
+        "category": "校园动态",
+        "intent_group": "notice",
+        "ai_summary": "自下周起统一通过校内预约平台挂号，原电话预约渠道停用。",
+        "ai_is_event": false,
+        "ai_event_time": null,
+        "ai_event_location": null,
+        "ai_time_evidence": "自下周起执行",
+        "organizer": "清华大学校医院",
+        "ai_intent": "知悉"
+      },
+      "parsed": {
+        "start": null,
+        "end": null,
+        "deadline": null,
+        "bucket": "undated",
+        "evidence": "自下周起执行"
+      }
+    }
+  ]
+}

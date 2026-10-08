@@ -1,0 +1,3 @@
+# notice-digest 运行依赖
+# 核心引擎只用标准库；requests 供渲染/投递层（deliver-dev）可选使用。
+requests>=2.31

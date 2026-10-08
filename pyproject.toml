@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "notice-digest"
+version = "0.1.0"
+description = "抓取校园通知聚合站，做中文时间解析与事件抽取，个性化排序后每日邮件推送（含 ICS 日历附件）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+# 核心只用标准库；requests 仅用于少数需要更细控制 HTTP 行为的地方。
+dependencies = [
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+# 开发期无额外依赖：测试用标准库 unittest。
+dev = []
+
+[project.scripts]
+notice-digest = "notice_digest.cli:main"
+
+[tool.setuptools]
+# 仓库是扁平布局：包目录就在根下。
+packages = ["notice_digest"]

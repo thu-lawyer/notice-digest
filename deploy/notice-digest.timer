@@ -1,0 +1,15 @@
+[Unit]
+Description=每日 07:30 触发 notice-digest（Asia/Shanghai，刻意避开 /opt/aidigest 的 08:00）
+Documentation=file:/opt/notice-digest/docs/RUNBOOK.md
+
+[Timer]
+# 服务器本地时区即 Asia/Shanghai（timedatectl 已核），故此处不写时区后缀。
+# 07:30 与同机 /opt/aidigest（08:00）错开 30 分钟，避免同时抓取与投递。
+OnCalendar=*-*-* 07:30:00
+# 机器在 07:30 关机/休眠错过时间点时，启动后补跑一次
+Persistent=true
+AccuracySec=1min
+Unit=notice-digest.service
+
+[Install]
+WantedBy=timers.target

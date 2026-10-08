@@ -1,0 +1,39 @@
+# ---- 密钥与本地配置：绝不入库 ----
+.env
+.env.*
+!.env.example
+
+# ---- 运行期数据：整个 data/ 目录排除（数据库、渲染产物、各类临时输出）----
+data/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+
+# ---- 编辑器 / 操作系统 ----
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*~
+
+# ---- 备份与临时文件 ----
+*.bak
+*.bak-*
+*.orig
+*.tmp
+*.log
+
+# ---- 打包产物 ----
+build/
+dist/
