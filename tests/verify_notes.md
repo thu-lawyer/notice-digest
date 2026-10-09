@@ -1235,3 +1235,273 @@ render 层纯度补充：同一份 scored/parsed 在 07:30 / 12:00 / 19:00 / 23:
    `test_02a`/`test_05c` 失败、`test_01e`/`test_02b` 报错，均依赖上游 pkuknow.cn 直连（HTTP 403，环境/上游因素，
    captain 已独立核实），**不计入本任务判定**。（captain 口径为 4 红，本轮实测 6 红，差异来自同为上游依赖的
    `test_01a`/`test_01b` 两个 live 用例。）
+
+---
+
+## 20. round 6 = t18 · t17 会话闸门修复独立复验（verifier · 2026-10-09）
+
+本节 = 验收项 ⑦ 的交付物本身。**追加前**本文件 sha256 = `9de1051542c5c9b1f0b15fcf07af1b76bf8c97daeba243e04e6991b3f3b314a1`（83846 字节，与开工时 `stat` 的 83846 B 一致）。
+
+> 披露：本节曾以错位的验收编号首次追加，随后**就地改版**为与任务 acceptance 逐条对齐的编号（下方 20.1–20.6 即 acceptance ①②③④⑤⑥）。改版只重排小标题与结论文案，**未改动任何实测数据**。
+
+### 20.1 ① 冻结声明
+
+- 本项 inScope 仅一个文件：`zcode/notice-digest/tests/verify_notes.md`（本文件）。全部验证过程中**未写入** `notice_digest/*.py`、`tests/test_integration.py`、`tests/test_fetch_session.py`。
+- **冻结判据**：开工锚点清单（PRE）与收工锚点清单（POST）各覆盖 **13 个文件**（`notice_digest/` 11 个模块 + `tests/test_integration.py` + `tests/test_fetch_session.py`），逐字节比对 sha256 与 mtime：
+
+```
+files PRE = 13   files POST = 13   same-file-set = True
+逐行比对：13/13 OK
+FREEZE_STILL_INTACT = True | mismatches = 0 | differing files: []
+```
+
+- 冻结清单 13 个文件：`notice_digest/{__init__,cli,config,enrich,feedback,fetch,mailer,render,score,store,timeparse}.py`、`tests/test_integration.py`、`tests/test_fetch_session.py`。
+- **诚实披露**：`tests/verify_notes.md` 本身不在冻结清单内 —— 它是本任务的 inScope 文件，其哈希因本节写入而变化，属预期；冻结声明只覆盖被验证的产品代码与两个测试文件。
+- 关键锚点：`notice_digest/fetch.py` sha256 `16d2aef3731bdd58ecf5886a1c1d4349475df6d6f62dd24b33f41797e33b8302`；`tests/test_fetch_session.py` sha256 `84132478563744ae6e76547435aec3fea6f83fb4dc103899c924130ef5e4337d`；`tests/test_integration.py` sha256 `73aea3502b558182b3ee377394df32231ab7eb726d2964ba67b6f833fb6156a1`。
+
+### 20.2 ② 六条历史红灯是否转绿（含「断言未放宽」）
+
+`python3 -m unittest discover -s tests -v`（冻结树）最终汇总行逐字原文：
+
+```
+Ran 185 tests in 42.849s
+FAILED (failures=2)
+```
+
+六条历史红灯在本次运行中的逐字结果行：
+
+```
+test_01a_fresh_db_fetch_enrich_report (test_integration.Test01LiveEndToEnd.test_01a_fresh_db_fetch_enrich_report) ... ok
+test_01b_render_and_dryrun_artifacts (test_integration.Test01LiveEndToEnd.test_01b_render_and_dryrun_artifacts) ... ok
+test_02a_second_fetch_is_noop (test_integration.Test02Idempotency.test_02a_second_fetch_is_noop) ... ok
+test_05c_zero_config_fetch_to_render_live (test_integration.Test05ZeroConfig.test_05c_zero_config_fetch_to_render_live) ... ok
+```
+
+- 判据：`test_01a_*` / `test_01b_*` / `test_02a_*` / `test_05c_*` 为 `ok`；`test_01e_*` / `test_02b_*`（原为 ERROR）本次未出现在失败列表中。`FAILED (failures=2)` 的两项为 `test_07a_worktree_is_clean` / `test_07b_env_example_placeholders_only`（凭据扫描误报，见 20.7），与本项修复无关。
+- **断言未被放宽**：`tests/test_fetch_session.py` 43 个 assert、`tests/test_integration.py` 317 个 assert、`tests/` 合计 761 个 assert；两个测试文件的 sha256 与冻结前一致（见 20.1），本次未做任何断言删改 ⇒ 六条测试是在**未修改的原断言**下转绿。
+
+### 20.3 ③ 「未放宽断言」的反证（人工回退必须变红）
+
+在**项目目录之外**的副本上把 t17 修复人工回退，同一套测试必须变红。两次反证均在 `Vesper缓存/临时工作区/nd_r5/` 下的独立副本中完成，**项目树未被触碰**（`fetch.py` sha256 仍为 `16d2aef3…`）。
+
+- **反证 A**（403 会话重放闸门回退为 `if False:`）：`NEGCTL_A_EXIT=1`，`Ran 10 tests in 3.858s`，`FAILED (failures=1, errors=3)`；红灯项：`ERROR test_01_cold_403_then_cookie_replay_succeeds`、`ERROR test_05_detail_endpoint_recovers_through_the_same_gate`、`ERROR test_06_cookie_is_reused_across_requests_in_one_run`、`FAIL test_02_permanent_gate_retries_at_most_once`。
+- **反证 B**（cookie 处理回退为裸 `urlopen`，无 cookie 罐）：`NEGCTL_B_EXIT=1`，`Ran 10 tests in 3.934s`，`FAILED (errors=3)`；红灯项：`ERROR test_01…`、`ERROR test_05…`、`ERROR test_06…` —— 全部为 403／会话相关失败项。
+
+判据：修复被回退后，失败项名称逐条指向会话闸门与 cookie 复用（403 相关）；修复在位时同一套测试全绿 ⇒ 绿灯来自修复本身，不是断言放宽。
+
+### 20.4 ④ 活体端到端 fetch → enrich → render
+
+- `fetch --pages 2`：`CMD3_EXIT=0`；`campus=thu`、`pages_scanned=2`、`new=60`、`known=0`、`skipped_items=0`、`stop_reason=reached-max-pages`、`repeat_detected=false`；分页明细 p1/p2 均为 `items=30 new=30 known=0 skipped=0`；`anomalies=[{kind: max-pages-hit, severity: warn}]`；`db=data/t19.db`。
+- `enrich`：`CMD4_EXIT=0`；
+
+```
+{"candidates": 6, "fetched": 6, "failed": 0, "skipped": 0, "not_found": 0, "errors": 0, "error_samples": [], "structured_time": 1, "text_only": 1, "no_time": 4, "anomalies": []}
+```
+
+- `render`：`CMD5_EXIT=0`；`{"subject": "清华通知日报 10-09｜明日 1 场活动"}`；`out.html` 17732 B、`out.ics` 4167 B。
+
+**「单条 enrich 失败不丢条目」的实测补充**：活体一轮 `failed=0`，无法产生自然样本，故另做进程内注入实测（仅令该条详情端点返回 404，其余条目走真实上游）：
+
+```
+ENRICH_STATS_JSON = {"candidates": 2, "fetched": 1, "failed": 1, "skipped": 0, "not_found": 1, "errors": 0, "error_samples": [], "structured_time": 0, "text_only": 1, "no_time": 0}
+DETAIL_FETCH_CALLS = ['weixinzs_477133228:12247397', 'weixinzs_467874276:12240933']
+items_total = 60 | before = 60
+  VICTIM(injected-fail)  id=weixinzs_477133228:12247397 detail_status=metadata_only attempts=1 has_detail=1
+  LIVE(real-fetch)       id=weixinzs_467874276:12240933 detail_status=complete attempts=0 has_detail=1
+VICTIM_STILL_PRESENT = True
+```
+
+判据：失败条数与 id 均可见（`failed=1`、`not_found=1`、id `weixinzs_477133228:12247397`），`enrich_attempts` 由 0 增至 1（失败被记账），该条**仍在 `items` 中**（`items_total` 前后同为 60、`VICTIM_STILL_PRESENT=True`），且未中断同批另一条的真实抓取（另一条 `detail_status=complete`）。
+
+### 20.5 ⑤ 冷请求行为（全新进程 + 全新 cookie 罐）
+
+- 全新进程、全新 cookie 罐请求列表端点：`fetch_list("thu", 1)` 成功，`items=30`。
+- 同一 URL 请求次数：`n=2`（≤2，无无界重试）；请求序列 `['HTTP 403', 'HTTP 200']`。
+- cookie 罐内 cookie 名：`['__Host-pku_read_guest']` ⇒ 冷请求不再恒 403，首次 403 后经会话重放拿到 200。
+
+### 20.6 ⑥ 失败路径未被破坏（按既有 tier 分级，逐类实测）
+
+逐字取自 `cmd1_discover.log`（冻结树全量套件内的端到端断言）：
+
+```
+[R2-D3] exit=3 new=0 stop=page-1-schema-drift rows=0 failure_mail=1 anomalies=[('schema-drift', 'error'), ('zero-new', 'warn')]
+[R3-D3-FULL] exit=3 new=0 known=0 skipped_items=1 stop=page-1-schema-drift rows=0 failure_mail=1 per_page=[{'page': 1, 'items': 1, 'new': 0, 'known': 0, 'skipped': 1}] anomalies=[('schema-drift', 'error'), ('zero-new', 'warn')]
+[R3-D3-PARTIAL] exit=0 new=1 rows=1 skipped_items=1 per_page=[{'page': 1, 'items': 2, 'new': 1, 'known': 0, 'skipped': 1}] anomalies=[('item-missing-id', 'warn'), ('max-pages-hit', 'warn')] failure_mail=0
+[R3-D3-CONTROL] 首轮 exit=0 new=1；二次 exit=0 new=0 skipped_items=0 stop=page-1-all-known rows=1 error级anomaly=[] failure_mail=0
+[R3-R1] exit=0 fetched=1 failed=0 errors=0 structured_time=1 text_only=0 no_time=0 detail_status=complete body_status=ok TypeError_in_stderr=False
+[R2-R5] exit=0 not_found=1 fetched=2 ok1_detail=有 ok2_detail=有 gone_detail=无 detail_status='complete'/'complete'/None 第二轮重抓=['t9:r2:gone']
+[R2-MAXPAGES] exit=0 stop=reached-max-pages anomalies=[('max-pages-hit', 'warn')]
+[R2-ZERONEW] 首轮 new=5 exit=0；二次 new=0 exit=0 stop=page-1-all-known
+```
+
+- 详情 404／单条 enrich 失败：`[R2-R5]` `not_found=1` 仍 `exit=0`，其余条目照常抓取。
+- 末页重复：`[R2-MAXPAGES]` 为 `warn` 而非 fatal。
+- 零新增：`[R2-ZERONEW]` 与 `[R3-D3-CONTROL]` 二次 `new=0`、`error级anomaly=[]`、`failure_mail=0` ⇒ 真零新增不制造失败邮件。
+- 部分可用（部分 item 缺 id）：`severity=warn` + `skipped_items` 可见 + `exit=0` + 无失败邮件。
+- 整页不可用（schema drift）：`severity=error` + `stop_reason=page-1-schema-drift` + `exit=3` + 有失败邮件。
+
+判定：四类失败路径的分级与既有契约一致（error 级仅出现在「整页无可用条目」），会话闸门修复**未把任何一类失败升级为 fatal**。
+
+### 20.7 ⑦ 验证记录（本节）+ 不确定项与残余红灯
+
+本节即验收项 ⑦ 要求的验证记录：含**每条命令的原始输出**（20.2 / 20.4 / 20.5 / 20.6）、**逐项 judgement**（20.8 结论表）与**不确定项**（以下）。该文件的写入是本任务唯一的 inScope 改动。
+
+1. **残余 2 条红灯与本项无关但确实存在**：冻结树上 `discover` 汇总为 `FAILED (failures=2)`，两项为 `test_07a_worktree_is_clean` 与 `test_07b_env_example_placeholders_only`。
+   - 根因：扫描模式 `auth_code_word`（值为通用名词，非真实值）做全树子串匹配，6 处命中全部是面向运维者的文档/注释散文（`.env.example:9`、`.env.example:35`、`README.md:58`、`README.md:78`、`deploy/install.sh:128`、`deploy/install.sh:184`）；其余 4 个模式（服务器 IP／发件域／SMTP 账号／真实姓名）**0 命中**，被保护的性质仍成立。
+   - **前置存在性证明**：在项目目录外导出的干净 `HEAD=85bb15a` 树上跑同一套测试，两项同样失败；两份失败文本经路径前缀归一化后**逐字一致**（同测试 id、同行号 l.1237／l.1247、同断言文案）⇒ 这两条红灯在 t17 之前即存在，非 t17 引入。
+   - **不确定性**：该归一化只处理了 traceback 的路径前缀，其余逐字相同；若要求路径也逐字相同则无法成立（两棵树目录名不同）。
+2. **t17 声称的历史基线与我的实测不一致**：t17 报告 `Ran 175 / FAILED (failures=6, errors=2)`，我在干净 HEAD 树上实测 `Ran 175 tests / FAILED (failures=10, errors=1)`（多出 `01c/01d/08d` 等）。差异最可能来自活体网络波动（详情端点限速与上游抖动）。**以我的实测为准**；六条指定红灯的转绿结论是在冻结树上直接观测到的，不依赖 t17 的基线数字。
+3. **计数口径差异**：20.2 的 `185 tests` 含 `test_fetch_session.py` 的 10 条；t17 的 `175` 不含该文件（其基线导出树中该文件不存在）。两个数字不可直接相比。
+4. 单条 enrich 失败的反证是**进程内注入**（详情端点 404），非真实上游 404 —— 真实上游本轮 `failed=0`；注入点在 `fetch.fetch_detail`，与生产失败路径同一函数入口。
+
+### 20.8 结论
+
+| 验收项 | 判定 | 依据 |
+| --- | --- | --- |
+| ① 冻结声明（PRE/POST 13 文件逐字节一致） | pass | `FREEZE_STILL_INTACT = True`，0 mismatch |
+| ② 六条历史红灯转绿（含计数与测试文件哈希） | pass | 四条 `ok`、两条不在失败列表；断言数 43/317/761 未降 |
+| ③ 「未放宽断言」的反证 | pass | 反证 A/B 均变红并指名 403／会话失败项 |
+| ④ 活体端到端 fetch→enrich→render | pass | 三条命令 exit=0；计数与 JSON 均可见；单条失败不丢条目 |
+| ⑤ 冷请求不恒 403 | pass | 403→200，同 URL 2 次，jar 内 `__Host-pku_read_guest` |
+| ⑥ 失败路径分级未被破坏 | pass | 四类失败 tier 与既有契约一致，无 fatal 升级 |
+| ⑦ 验证记录已追加 | pass | 本节含命令原文、逐项 judgement、不确定项 |
+
+残余 2 条凭据扫描红灯为**前置存在、与本项修复无关**的误报，已按 20.7 披露。
+
+---
+
+## 21. round 6 = t19 · t17 会话闸门修复 · 对抗式审查（reviewer · attempt e67e46e2-0e59-4b68-b714-90556fb912c2）
+
+**被测对象**：`notice_digest/fetch.py`（`16d2aef3731bdd58` / 13528 B）——t17 引入的访客会话闸门（`Session` + cookie 罐 + 403 重放）。
+**审查问句**：新引入的会话层会不会**成为新的失败源**？（cookie 获取/复用/过期语义、`__Host-` 前缀约束是否被尊重、403 处置是否退化为无界重试、5xx 与非 JSON 是否仍按既有 tier 分级、并发/多进程下 cookie 罐是否安全。）
+
+### 21.0 冻结与测量方法（验收 1）
+
+| 项 | 结果 |
+| --- | --- |
+| 开工锚点 | 13 个文件（10 模块 + `test_integration.py` + `test_fetch_session.py`）sha256 + size，存 `…/Vesper缓存/临时工作区/nd_review/t19/anchors_start.json`（云盘根相对路径） |
+| 收工复核 | 重新逐字节计算 13/13，`identical=true`，`diff=[]` —— **树在验证期间静止** |
+| 不在锚点内 | `tests/verify_notes.md`（各轮 verifier 并发追加，§20 于本轮期间由 t18 verifier 追加，行数 1237 → 1364，**不构成中止或判红理由**） |
+
+三组探针（全部驱动**真实** `notice_digest.fetch` / `cli`，对接本机 `ThreadingHTTPServer(127.0.0.1:0)` 假站点，`F.BASE_URL` 重指；`time.sleep` 打桩为记录器）：
+
+- **探针 A**：进程内 15 个失败场景（S1–S15），逐场景一行 `SCENARIO` JSON —— `nd_t19_matrix.py` / `matrix_run1.log`（17 行，exit 0）。
+- **探针 B**：跨**进程**语义 —— 两个全新解释器各跑一页，父进程记录请求序列（`nd_t19_proc.py` + `nd_t19_proc_child.py`）。
+- **探针 C**：修复前后 **exit code / 请求数 / 条目数** 对照 + 幂等 —— `t19_pre`（`fetch.py` := 修复前 `05b47008e1df510b`）与 `t19_post`（现行）两棵树，`diff -rq` 证明两棵树**只有 `fetch.py` 不同**（`nd_t19_tiers.py` + `nd_t19_tier_child.py`）。
+
+### 21.1 可达性图（验收 2）—— 逐失败模式 × 拦截/重试代码行 × 行为证据
+
+| ID | 失败模式 | 由哪段代码拦下/重试 | 实测（探针 A） |
+| --- | --- | --- | --- |
+| ① | **首次冷 403**（响应带 `Set-Cookie`） | `fetch.py` L229 闸门条件成立 → L234-236 sleep → L238 带 cookie 原样重放**一次** | `req=2`，`sleeps=[1.0]`（`Retry-After: 1`），**成功**；序列 `[page1\|- → page1\|__Host-pku_read_guest=111111]` |
+| ② | **cookie 过期/被上游拒绝后的 403** | 同上闸门（L229 只看「响应下发 Set-Cookie」+「罐非空」，不区分新旧） → 重放即换新凭证 | `req=2`，`sleeps=[1.0]`，**恢复成功**；另 S5 过期凭证亦 `req=2` 恢复 |
+| ③ | **上游 5xx** | 不满足 L229/L247/L251 任一 break → 落 L257-258 退避 → `attempts=3` 用尽 → L259 `raise FetchError` | `req=3`，`sleeps=[1.5, 3.0]`，错误 `HTTP 500`，`exit=3` |
+| ④ | **返回非 JSON**（200 但非 JSON） | `_read_json` L210-217 `json.loads` 抛 `ValueError` → L255 收为 `FetchError` → 同 L257-258 退避 ×3 | `req=3`，`sleeps=[1.5, 3.0]`，错误 `Expecting value: line 1 column 1 (char 0)`，`exit=3` |
+| ⑤ | **detail 404** | L251-252 `if exc.code in (400, 404): break` —— 请求本身有问题，重试无意义 | `req=1`，错误 `HTTP 404`，`exit=3` |
+| ⑥ | **持续 403（不可自愈）** | 首 403 → L229 闸门 → 重放仍 403 → **L242 `raise FetchError`**（在 `except` 体内抛出，**逃出整个重试循环**） | 带 `Set-Cookie` 者 `req=2`，`sleeps=[2.0]`；**不带** `Set-Cookie` 者 L247-250 `break` → `req=1`。两者均**有界**，`exit=3` |
+
+补充（同属 403 分支的边界，非独立模式）：`Retry-After: 999` → sleep **钳到 5.0**（`_MAX_RETRY_AFTER`）；畸形 `Retry-After` → sleep **0.0**。即服务端不能用 `Retry-After` 让客户端睡到天荒地老。
+
+### 21.2 请求次数上界（验收 3）—— 含一处**精确化修正**
+
+同一 URL 实测计数：
+
+| 路径 | 计数 | 说明 |
+| --- | --- | --- |
+| 冷 403 → 闸门重放 | **2** | 即修复针对的那条路径；`MAX_REQUESTS_PER_URL_SESSION_RETRY = 2` 名副其实 |
+| 同会话复用凭证（后续请求） | **1** | S2；S11 显示 detail 拿到的凭证可被 list 复用（detail=2、list=1、无 sleep） |
+| 5xx / 非 JSON / 网络错 | **3** | `retries=3` 的既有重试循环，**非 t17 引入** |
+| 网络错之后再遇闸门（复合） | **4** | S12 `req=4`、`sleeps=[1.5, 3.0, 1.0]` = `retries + 1` |
+
+**修正**：验收文字写的「同一 URL 请求次数 ≤2」**只在 403 闸门路径上成立**；全局上界是 `retries + 1 = 4`（瞬时错误 3 次，复合 4 次）。这不是 t17 的回归 —— 探针 C 显示修复前后 `http500` 均为 **3/3**、`nonjson` 均为 **3/3**、`http404` 均为 **1/1**（见 21.4）。**关键性质成立**：无无界重试 —— 循环 `for attempt in range(attempts)`（L224）恒 ≤3 次；闸门重放要么 `return`（L238）要么抛错逃出循环（L242/244/246），**不可能回到循环体内再放一次**。最坏单 URL 墙钟 ≈ 1.5+3.0 退避 + ≤5.0 钳制退避 ≈ **9.5 s**，无人值守可接受。
+
+### 21.3 并发 / 多进程语义（验收 4）
+
+- **进程内：共享**（不是每次新建）。`_DEFAULT_SESSION = Session()` 是 **L158 模块级单例**，`_get_json` L227 `sess = session or _DEFAULT_SESSION`；且 `grep -n "session\|make_session\|_DEFAULT_SESSION" notice_digest/cli.py` → **零命中** ⇒ 所有 CLI 抓取都落在同一个罐上。S3 实测：同进程两次调用合计 `req=3`（首次 2 + 复用 1），**凭证确实跨调用复用**。
+- **跨进程：不共享**。探针 B：两个全新解释器各自 `jar_before=0` / `has_cookies_before=false`、罐对象身份不同，各自为它的第一页付**恰好一次冷 403（2 请求）**，`rc=0`、`items=1`。所以不存在「跨天/跨轮持有陈旧凭证」的风险 —— 每个进程从零开始重新协商。
+- **共享是否安全**：抓取路径**单线程**（`grep ThreadPool|concurrent.futures|threading|multiprocessing` over `notice_digest/` 仅命中 `feedback.py` L21/L152/L391，与 fetch 无关）。且 `http.cookiejar.CookieJar` 自带 `_cookies_lock`。即使未来被并发调用，最坏后果是**多付一次冷 403（+1 请求）**，不产生跨域凭证串用（单 host）。判为安全。
+
+### 21.4 无回归（验收 5）—— 行为对照，非源码 diff
+
+探针 C 的 `SUMMARY`（同一假站点的 7 类输入，`t19_pre` vs `t19_post`）：
+
+| 案例 | pre exit / post exit | 同？ | pre req / post req | pre items / post items |
+| --- | --- | --- | --- | --- |
+| `ok200` | 0 / 0 | ✅ | 1 / 1 | 1 / 1 |
+| `http500` | 3 / 3 | ✅ | 3 / 3 | 0 / 0 |
+| `nonjson` | 3 / 3 | ✅ | 3 / 3 | 0 / 0 |
+| `http404` | 3 / 3 | ✅ | 1 / 1 | 0 / 0 |
+| `perm403` | 3 / 3 | ✅ | 1 / 1 | 0 / 0 |
+| `netdrop` | 3 / 3 | ✅ | 3 / 3 | 0 / 0 |
+| `gate`（冷 403+Set-Cookie） | **3 / 0** | ❌（**这正是修复目标**） | **1 / 2** | **0 / 1** |
+
+失败路径的 tier 文本逐字一致（例：`[fetch] 失败（致命，exit 3）：HTTP 500 for http://127.0.0.1:PORT/thu/api/notices?page=1`；非 JSON 同形，`report_failure_calls: 1`）。**幂等**：`IDEMPOTENCE` 两棵树均为「同库连跑两次 `ok200`：1 / 1 条目，exit 0/0，各 1 请求」→ 完全不变。结论：六级 tier 与幂等语义**零变化**，唯一差异是 t17 声称要修的那一条。
+
+### 21.5 残余与披露（明示非缺陷，供后续任务参考）
+
+1. **测量夹具需一处接缝（必须披露）**：假站点是**明文 http**，而 `Secure` cookie 在 http 下「可入罐、不可发送」（`DefaultCookiePolicy` **没有** `set_ok_secure`，入库侧不校验 `Secure`；发送侧 `return_ok_secure` 才拦）。故 POST 树的测量需把 `_DEFAULT_SESSION` 换成 permissive policy 的会话（子进程自报 `session_patched: true`；PRE 树无 `Session`，故 `false`）。**生产 `BASE_URL = https://pkuknow.cn`，此接缝不必要。**
+2. **`__Host-` 前缀约束未被库强制**（S14）：给 `__Host-pku_read_guest` 配 `Path=/sub` 时 `http.cookiejar` 照存不误 ⇒ 前缀规则（Secure + `Path=/` + 无 Domain）**由服务端与部署事实保证，不由库保证**。因单 host + https，实际无风险；若未来 `BASE_URL` 降级为 http，闸门会「存下但发不出」→ 白付一次重放（**有界**，S13 实测 `req=2`、两次均无 Cookie 头、最终 403）。
+3. **`has_cookies` 弱于「本 URL 有可用凭证」**：`any(True for _ in self.jar)` 只问罐非空，不问是否适用当前 host/path。单 host 场景下等价，多 host 场景最坏多付一次重放（有界）。
+4. **低危**：`HTTPError` 的响应体/套接字在 `_read_json` 路径未被显式关闭（依赖 GC）。
+
+### 21.6 结论
+
+| 验收项 | 结果 | 依据 |
+| --- | --- | --- |
+| ① 开工/收工 sha256 冻结一致 | pass | 13/13 逐字节一致，`diff=[]` |
+| ② 六失败模式可达性图（含状态码/退出码） | pass | 21.1 表，S1–S15 + 探针 C 实测 |
+| ③ 请求次数上界 / 无无界重试 | pass（措辞已精确化） | 闸门 2；全局 ≤ `retries+1`=4；循环恒 ≤3；退避钳 ≤5.0 s |
+| ④ 并发/多进程 cookie 罐语义 | pass | 进程内共享（S3 + cli.py 零引用）；跨进程不共享（探针 B）；单线程 ⇒ 安全 |
+| ⑤ 无回归（exit 分级 + 幂等） | pass | 六类输入 exit/req/items 全同；幂等 1 条/0/0/1 请求不变 |
+
+**判：t17 的会话闸门修复未引入新失败源。** 它没有变成无界重试（最坏 2 次且有硬上界），没有改变 5xx/非 JSON/404 的既有 tier，没有破坏幂等；凭证语义是「进程内复用、跨进程重新协商」，与无人值守每日 07:30 单进程单跑的使用方式一致。残余 4 条均为**披露级**（测量夹具接缝、库不强制 `__Host-`、`has_cookies` 谓词偏弱、`HTTPError` 未显式关闭），**无一条构成阻塞**。
+
+
+## t24 复核：凭据闸门「相对旧谓词」实测清单（reviewer 独立测量，append-only）
+
+被复核谓词：tests/test_integration.py `Test07CredentialScan`（sha256 28f69ad4c8c530047551e7e72fd396aad50abd39ef638a0b834047098e1d9884）。
+对照仪器：① HEAD 85bb15a 的名词子串谓词；② r2 PRE（t21 round-1 谓词复刻，sha256 ab4d032a3ad8e01089201c344da762bf87785c647ed64f0d2faea3aa645f4ba1，副本见 Vesper缓存/临时工作区/nd_t23/pre_r2_test_integration.py）。
+
+【已确认成立的结论】
+- 假阳性确已修好：旧名词子串谓词在冻结树上 10 行命中（6 行合法文档散文 + 4 行新谓词自身 docstring/常量），新谓词 0 行命中；37 文件全树 0 命中。
+- 六处合法文档散文逐字未改，新谓词全部放行（.env.example:9,35 / README.md:58,78 / deploy/install.sh:128,184）。
+- 断言不减少（自数：tests/ 合计 779 asserts / 187 tests；HEAD 85bb15a 对照 723 / 175）；全套 187 passed。
+- 四真值模式（server_ip / sender_email_domain / smtp_account / real_name）在位，注入反证变红并指名文件:行。
+
+【未成立：净回归 —— 相对 r2 PRE（t21）由「命中」变「不命中」，且取值形态就是真实凭据】
+A. 中文凭据名词不在行首键位（前缀 ASCII 词/中文词 + 空格 之后）：
+   `SMTP 授权码：<真值>`   pre_r2 命中 → 新谓词不命中
+   `SMTP 授权码: <真值>`   pre_r2 命中 → 不命中
+   `SMTP 授权码 <真值>`    pre_r2 命中 → 不命中
+   `邮箱 授权码：<真值>`    pre_r2 命中 → 不命中
+   `（授权码：<真值>）`     pre_r2 命中 → 不命中
+   对照：`授权码：<真值>`（行首）仍命中。
+B. 未加引号、含标点的取值被判为「代码片段/标识符」而放行：
+   `ND_SMTP_PASS=abc.def123`    pre_r2 命中 → 不命中
+   `ND_SMTP_PASS=P@ssw0rd.2026` pre_r2 命中 → 不命中
+   `ND_SMTP_PASS=abc:def123`    pre_r2 命中 → 不命中
+   `ND_SMTP_PASS=abc.def123.`   pre_r2 命中 → 不命中
+   `smtp_pass=abc.def123`       pre_r2 命中 → 不命中
+   `hmac_secret=a.b1c2d3`       pre_r2 命中 → 不命中
+   `smtp_pass: abc.def123`      pre_r2 命中 → 不命中
+   对照：加引号的 `ND_SMTP_PASS="abc.def123"` 仍命中；`ND_SMTP_PASS=abcdef123` 仍命中。
+C. markdown 值形态（三旧仪器均未命中，属绝对覆盖缺口，非回归；但裁定 C 条件 5 要求命中）：
+   `| `ND_SMTP_PASS` | <真值> |`（表格行）
+   `| `smtp_pass` | `<真值>` |`（表格行，值列带反引号）
+   `**smtp_pass**: <真值>`（加粗键）
+   `**ND_SMTP_PASS**=<真值>`（加粗键+等号）
+
+【谓词自述残余盲区 ⑤–⑩ 照录（不美化，逐字取自 tests/test_integration.py L1228–1236）】
+  命题 B（不成立）——本谓词**不构成绝对覆盖**。残余盲区至少五处：
+    ⑤ 无分隔符的 ASCII 名与取值跨行（`password` 换行 `xxxx`）；
+    ⑥ 布尔/空值形态按「无秘密可言」放行；
+    ⑦ 取值尾部是中文括注时，先剥尾部非 ASCII 段再进行判定（剥多了会放行）；
+    ⑧ 未加引号且含 `.` 的取值被判为「代码片段/标识符」而放行；
+    ⑨ 行内关键字实参（`send(passwd="…")`）不在行首键位，不报。
+    ⑩ TOML/INI 段头形态（`[smtp_pass]` 方括号之外无算子直接跟取值）不报。
+  注：⑧ 经本次实测**同时是一条净回归**（见上 B 组），不只是「盲区」；
+  ⑩ 的 `[smtp_pass]` 段头已实测确认不报（并非真实 TOML 语法，可忽略，但照录）。
+
+【RUNBOOK §12 建议条目】
+- 本仓存在**两套旧谓词复刻**（HEAD 名词子串、r2 PRE=t21 round-1）；任何「相对基线无回归」的结论必须写明用的是哪一套，否则结论不可复核。
+- 新谓词当前**弱于 r2 PRE**（净回归 8 类字面输入，见 A/B 组），在修复前不得宣称「严格更强」。
