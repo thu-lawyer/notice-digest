@@ -17,9 +17,11 @@ EnvironmentFile=/opt/notice-digest/.env
 
 # 用项目 venv 的解释器，不用系统 python3（系统 python 无 requests 等依赖）
 # 注意：Type=oneshot 下 systemd 默认禁用启动超时（官方文档：oneshot 的 TimeoutStartSec 默认 disabled），
-# 因此 enrich 的 1 req/s 详情限速（最坏 120s+）不会被 systemd 掐断。
+# 因此 enrich 的 1 req/s 详情限速（最坏 60s+）不会被 systemd 掐断。
+# 详情配额（t27 实测，见 docs/RUNBOOK.md §17）：429 墙由**短窗口突发**触发，维持 ≥1s/请求节流即安全；
+# --limit 60 是保守上界（配合 t27 的「首次 429 立即收批」降级，超限只影响补全条数、不致命）。
 ExecStart=/opt/notice-digest/.venv/bin/python -m notice_digest.cli fetch --pages 30
-ExecStart=/opt/notice-digest/.venv/bin/python -m notice_digest.cli enrich --limit 120
+ExecStart=/opt/notice-digest/.venv/bin/python -m notice_digest.cli enrich --limit 60
 ExecStart=/opt/notice-digest/.venv/bin/python -m notice_digest.cli send
 
 # 不需要 systemd 重启：由 timer 每日触发；单次失败由 OnFailure= 发失败邮件
