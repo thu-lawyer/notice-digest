@@ -52,9 +52,28 @@ MAX_REQUESTS_PER_URL_SESSION_RETRY = 2
 #: 会话重放前最多等待的秒数（站点给 ``retry-after: 1``，照它稍等，但设上界）。
 _MAX_RETRY_AFTER = 5.0
 
+#: 429（限流）时 ``Retry-After`` 的等待上界（秒）。限流是站点级**配额**，不是请求缺陷：
+#: 等太久只会把日报拖过投递窗口，所以退避一律有界，且由调用方决定是否收批（t27）。
+RATE_LIMIT_BACKOFF_CAP = 30.0
+
 
 class FetchError(Exception):
     """列表 / 详情请求失败或返回结构异常。"""
+
+
+class RateLimited(FetchError):
+    """HTTP 429：站点限流（t27）。
+
+    与结构性失败（5xx / 非 JSON / 网络断）区分开：429 表示「请求本身没问题、
+    配额用完了」。因此**不重试**（重试只会烧掉退避时间而不改变结果），只把
+    ``retry_after`` 交给调用方，由批处理决定「收批留待下一轮」还是「有界退避」。
+    """
+
+    status = 429
+
+    def __init__(self, message: str, retry_after: float = 0.0):
+        super().__init__(message)
+        self.retry_after = float(retry_after or 0.0)
 
 
 def _resolve_prefix(campus: str) -> str:
@@ -194,6 +213,26 @@ def _retry_after_seconds(response) -> float:
     return max(0.0, min(seconds, _MAX_RETRY_AFTER))
 
 
+def _rate_limit_retry_after(response) -> float:
+    """读 429 响应的 ``Retry-After``（秒），上限 ``RATE_LIMIT_BACKOFF_CAP``。
+
+    与 403 闸门用的 ``_retry_after_seconds`` 分开：那个上界 5 秒（闸门重放前的小睡），
+    这个上界 30 秒（限流窗口）。读不到 / 不可解析则为 0 —— 实测 pkuknow 的 429
+    响应**不带**该头（见 docs/RUNBOOK.md §17）。
+    """
+    try:
+        raw = response.headers.get("Retry-After")
+    except Exception:  # pragma: no cover - 头部缺失/对象不支持
+        return 0.0
+    if not raw:
+        return 0.0
+    try:
+        seconds = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(seconds, RATE_LIMIT_BACKOFF_CAP))
+
+
 def _session_cookie_delivered(response) -> bool:
     """这次响应是否下发了 ``Set-Cookie``（⇒ 值不值得带 cookie 重放）。
 
@@ -226,6 +265,15 @@ def _get_json(url: str, timeout: int, retries: int, session: Session | None = No
             return _read_json(sess, url, timeout)
         except urllib.error.HTTPError as exc:
             last_err = FetchError(f"HTTP {exc.code} for {url}")
+            if exc.code == 429:
+                # —— 限流（t27）——
+                # 429 是站点**配额**，不是请求缺陷：既不该重试（改不了结果），也不该
+                # 为每条白烧 1.5+3.0 秒退避（实测 4.79–4.84 s/条，60 条批次被拖到
+                # 5 分钟以上，日报因此错过投递窗口）。这里立即抛出分类异常，
+                # 退避与「是否收批」交给调用方。
+                raise RateLimited(
+                    f"HTTP 429 for {url}", retry_after=_rate_limit_retry_after(exc)
+                )
             if exc.code == 403 and _session_cookie_delivered(exc) and sess.has_cookies:
                 # —— 访客会话闸门 ——
                 # 冷请求的 403 响应里站点已下发访客会话 cookie（cookiejar 已收下），

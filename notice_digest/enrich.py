@@ -53,6 +53,26 @@ def _is_not_found(exc: BaseException) -> bool:
     return "404" in text or "not found" in text.lower()
 
 
+def _is_rate_limited(exc: BaseException) -> bool:
+    """异常是否由 429 限流引起（t27：与结构性失败分开计数）。"""
+    cls = getattr(fetch, "RateLimited", None)
+    return bool(cls is not None and isinstance(exc, cls))
+
+
+def _rate_limit_cooldown(seconds: float) -> float:
+    """429 的 ``Retry-After`` 有界退避（单次 ≤ ``fetch.RATE_LIMIT_BACKOFF_CAP``）。
+
+    实测 pkuknow 的 429 响应**不带** ``Retry-After``（见 docs/RUNBOOK.md §17），
+    因此生产路径不退避、立即收批；一旦站点补上该头，这里最多等 30 秒（有界），
+    批处理总时长仍然有界。
+    """
+    cap = float(getattr(fetch, "RATE_LIMIT_BACKOFF_CAP", 30.0))
+    delay = max(0.0, min(float(seconds or 0.0), cap))
+    if delay > 0:
+        time.sleep(delay)
+    return delay
+
+
 def enrich_one(
     store: Store,
     cfg: Config,
@@ -67,7 +87,9 @@ def enrich_one(
     """抓单条详情、写库，返回详情 dict；失败返回 None。
 
     单条失败只记录、不抛出（t7-R5）：一条 404 不得中断整批。
-    ``error_sink`` 由调用方传入，用于把失败分成 not_found / 其它失败。
+    ``error_sink`` 由调用方传入，用于把失败分成 rate_limited / not_found / 其它失败，
+    并写入 ``error_samples``（条目 id + 异常类型 + 异常消息，最多 5 条）——
+    429 限流的现场证据就在那里（docs/RUNBOOK.md §17）。
     """
     item_id = str(item.get("id") or "")
     if not item_id:
@@ -78,8 +100,18 @@ def enrich_one(
         store.touch_enrich_attempt(item_id)
         if error_sink is not None:
             error_sink["failed"] = int(error_sink.get("failed") or 0) + 1
-            if _is_not_found(exc):
+            if _is_rate_limited(exc):
+                error_sink["rate_limited"] = int(error_sink.get("rate_limited") or 0) + 1
+                error_sink["retry_after"] = float(getattr(exc, "retry_after", 0.0) or 0.0)
+            elif _is_not_found(exc):
                 error_sink["not_found"] = int(error_sink.get("not_found") or 0) + 1
+            # 失败样本（t27-F1）：每一条 FetchError 都要留下可被调用方看见的证据
+            # （条目 id + 异常类型 + 异常消息）。旧实现只在这里加计数、不写样本，
+            # 于是 60 条详情全灭时对外仍是 {"failed": 60, "errors": 0,
+            # "error_samples": []} —— 现场根本看不到 429。
+            samples = error_sink.setdefault("error_samples", [])
+            if len(samples) < 5:
+                samples.append(f"{item_id}｜{type(exc).__name__}: {exc}")
         return None
 
     store.update_detail(item_id, detail)
@@ -108,9 +140,18 @@ def enrich_pending(
     pending = store.pending_enrich(limit)
     fetched = failed = skipped = 0
     not_found = errors = 0
+    rate_limited = 0
     structured_cnt = text_cnt = none_cnt = 0
     error_samples: list[str] = []
     last_request_at = 0.0
+    item_started = 0.0
+    attempted = 0
+    stopped_reason = "done"
+    stopped_at: str | None = None
+    retry_after = 0.0
+    cooldown_seconds = 0.0
+    per_item_seconds: list[float] = []
+    batch_started = time.monotonic()
 
     for item in pending:
         if not needs_enrich(item):
@@ -120,8 +161,11 @@ def enrich_pending(
         if last_request_at and elapsed < min_interval:
             time.sleep(min_interval - elapsed)
         last_request_at = time.monotonic()
+        item_started = time.monotonic()
+        attempted += 1
 
-        per = {"failed": 0, "not_found": 0}
+        per = {"failed": 0, "not_found": 0, "rate_limited": 0, "retry_after": 0.0,
+               "error_samples": []}
         try:
             result = enrich_one(
                 store,
@@ -142,6 +186,22 @@ def enrich_pending(
 
         failed += int(per.get("failed") or 0)
         not_found += int(per.get("not_found") or 0)
+        rate_limited += int(per.get("rate_limited") or 0)
+        per_item_seconds.append(round(time.monotonic() - item_started, 3))
+        for sample in per.get("error_samples") or []:
+            if len(error_samples) < 5:
+                error_samples.append(sample)
+        if per.get("rate_limited"):
+            # —— 优雅降级（t27-F4）——
+            # 首次 429 立即收批：不再为剩余条目各烧一次约 4.8 秒的退避（旧行为下
+            # 60 条 = 60 × 4.81 s ≈ 289 s，日报直接被拖出投递窗口）。已补全的条目
+            # 照常入库；未补全的**原样留在 pending**（只 +1 enrich_attempts，
+            # 不写失败态、不删行），下一轮自然重试。
+            stopped_reason = "rate-limited"
+            stopped_at = str(item.get("id") or "") or None
+            retry_after = float(per.get("retry_after") or 0.0)
+            cooldown_seconds = _rate_limit_cooldown(retry_after)
+            break
         if result is None:
             continue
         fetched += 1
@@ -164,11 +224,21 @@ def enrich_pending(
         "failed": failed,
         "skipped": skipped,
         "not_found": not_found,
+        "rate_limited": rate_limited,
         "errors": errors,
         "error_samples": error_samples,
         "structured_time": structured_cnt,
         "text_only": text_cnt,
         "no_time": none_cnt,
+        # —— 收批与耗时台账（t27-F2/F4）——
+        "stopped_reason": stopped_reason,
+        "stopped_at": stopped_at,
+        "retry_after": retry_after,
+        "cooldown_seconds": round(cooldown_seconds, 3),
+        "attempted": attempted,
+        "remaining_pending": max(0, len(pending) - attempted),
+        "elapsed_seconds": round(time.monotonic() - batch_started, 3),
+        "per_item_seconds": per_item_seconds,
     }
 
 

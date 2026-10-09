@@ -236,6 +236,7 @@ def cmd_enrich(cfg: Config, args) -> int:
     parsed_ok = int(stats.get("structured_time") or 0) + int(stats.get("text_only") or 0)
     not_found = int(stats.get("not_found") or 0)
     item_errors = int(stats.get("errors") or 0)
+    rate_limited = int(stats.get("rate_limited") or 0)
     # 单条详情 404 属上游正常噪音（列表里仍挂着已下架的条目），只记 warn、
     # 不触发失败邮件；该条已 touch_enrich_attempt，下一轮会自然重试（t7-R5 / 裁决二）。
     if not_found:
@@ -250,17 +251,40 @@ def cmd_enrich(cfg: Config, args) -> int:
             "severity": "warn",
             "detail": f"{item_errors} 条补全时抛非 FetchError 异常（未中断整批）；样例：{stats.get('error_samples')}",
         })
-    if fetched > 0 and parsed_ok == 0:
+    if fetched > 0 and parsed_ok == 0 and not rate_limited:
+        # rate_limited 时不判「解析 0 命中」：被配额截断的批次里，解析命中率是
+        # **有偏样本**（可能只补全到 1 条且恰好没有时间文本），拿它当结构性信号
+        # 会误报致命（t27-F3）。真正的解析失效仍会在不掺限流的批次里被抓到。
         anomalies.append({
             "kind": "parse-failure-spike",
             "severity": "error",
             "detail": f"补全 {fetched} 条，但时间解析 0 命中 —— 详情结构或解析规则可能已失效",
         })
-    if fetched > 0 and failed >= fetched:
+    if rate_limited:
+        # 429 是站点配额，不是结构性缺陷：单列一级计数 + warn，绝不发失败邮件（t27-F3）。
+        anomalies.append({
+            "kind": "detail-rate-limited",
+            "severity": "warn",
+            "detail": (
+                f"{rate_limited} 条详情被站点限流（HTTP 429）；本批首次命中即收批"
+                f"（stopped_at={stats.get('stopped_at')}，remaining="
+                f"{stats.get('remaining_pending')}），已补全的照常入库，"
+                f"未补全的原样留在 pending 留待下一轮；"
+                f"Retry-After={stats.get('retry_after')}"
+            ),
+        })
+    # 判据收窄（t27-F3）：只有「一条都没补全成功」且失败**不能被限流/404 解释**时，
+    # 才算结构性致命失败。原判据 `fetched > 0 and failed >= fetched` 会在
+    # 「先成功 60 条、随后被限流」时误报致命（60 >= 60），把一份有效日报打成失败邮件。
+    structural_failed = failed - rate_limited - not_found
+    if fetched == 0 and structural_failed > 0:
         anomalies.append({
             "kind": "detail-fetch-all-failed",
             "severity": "error",
-            "detail": f"详情请求 {fetched} 条全部失败",
+            "detail": (
+                f"详情请求 {fetched} 条全部失败"
+                f"（非限流、非 404 的结构性失败 {structural_failed} 条）"
+            ),
         })
     if fetched == 0 and int(stats.get("candidates") or 0) == 0 and int(stats.get("skipped") or 0) == 0:
         anomalies.append({"kind": "nothing-to-enrich", "severity": "warn", "detail": "没有待补全条目"})
