@@ -1200,61 +1200,587 @@ class Test06NoNewItemsNoEmail(unittest.TestCase):
 
 # ================================================ 7. 凭据与隐私扫描
 class Test07CredentialScan(unittest.TestCase):
-    """验收⑧：工作树内不得出现服务器 IP / 发件邮箱 / 真实姓名 / SMTP 账号及其口令。"""
+    """凭据/隐私扫描（07a–07d）：真值模式层 + 「承载秘密的键名」判据。
 
-    # 逐字量用拼接构造，避免本文件自己被自己的扫描命中
+    判定分三层：
+      D1 真值模式层——服务器 IP / 发件邮箱域名 / SMTP 账号 / 真实姓名。四个 needle
+         都是拼接字面量（避免本文件自曝），子串命中即报。
+      D2 键名层——键名是否「承载秘密」：中文标记须**结尾**（授权码 / 密码 / 口令 /
+         密钥 / 凭据）；ASCII 名按 _ - . 切段后任一段精确命中词元表
+         （pass / passwd / password / secret / token / key / auth / credential /…）。
+         凭据键的取值必须是白名单占位符，其余一切取值一律报命中。
+      D3 取值层——先规范化再判：成对剥引号、剥行尾注释、裁尾随 , ; ) } ] 与散文标点、
+         再剥尾部非 ASCII 段；然后只判「是否白名单占位符」。空值、true/false/null、
+         非凭据键的纯数值、类型名与代码片段不报。
+
+    支持的赋值形态（键名必须落在**行首键位**，以免代码里的形参/关键字误报）：
+      ① 键名 + 算子 + 取值（`=` `:` 全角 `＝` `：`），可带 export / 列表项 / 引号；
+      ② 键名单独一行 + 紧随行取值（跨行）；
+      ③ `#` 注释掉的赋值（单行判定，不跨行续读——注释是自足散文）；
+      ④ 无算子紧邻（中文名或含 _ - . 分隔的名，如「授权码 <取值>」）。
+
+    两条命题，务必分清：
+      命题 A（成立，实测口径）——本谓词**相对旧谓词更强**，且**净回归 0 已逐例实测**
+        （两个基线仪器：① HEAD 85bb15a 的名词子串谓词；② r2 实作 PRE
+        `pre_r2_test_integration.py`，sha256 ab4d032a…）。旧谓词把「取值像不像
+        随机串」（len≥8 且有数字）当主判据，于是漏掉词形取值与短取值；新判据删除该分支，
+        并逐例复核旧谓词的回归集：**无一条由「红」变「绿」**，
+        而旧谓词漏掉的形态（小写键名、连字符/点分隔、password/secret/token/key 词元、
+        词形取值、尾随标点、跨行取值、JSON/TOML 容器、**行内任意位置的键名**、
+        **未加引号却含 `. : @ -` 的取值**、**markdown 表格/反引号/加粗键名**）
+        全部转为命中。
+      命题 B（不成立）——本谓词**不构成绝对覆盖**。残余盲区至少五处：
+        ⑤ 无分隔符的 ASCII 名与取值跨行（`password` 换行 `xxxx`）；
+        ⑥ 布尔/空值形态按「无秘密可言」放行；
+        ⑦ 取值尾部是中文括注时，先剥尾部非 ASCII 段再进行判定（剥多了会放行）；
+        ⑨ 行内回退只对**键位自明**的键启用（中文名词键，或被 `` ` `` `*` `|` 界定的键），
+           所以关键字实参形态（裸键作实参、`key` 后接 lambda）与散文模板
+           （全大写键名后接同形占位词）在行内一律不报——这是**有意**的收窄，与基线一致（基线只认行首键位），
+           不是位置漏判；行首键位下这些形态照报。
+        ⑩ TOML/INI 段头形态（`[smtp_pass]` 方括号之外无算子直接跟取值）不报。
+        ⑪ 取值含 `://` 的 URL 形态放行（`proxy_pass http://…` 这类指令行不报）；
+           基线的 BARE_RE 同样放行，未收紧。
+        ⑧ 未加引号且含 `.` 的取值被判为「代码片段/标识符」而放行——**净回归（已修复）**，
+           本轮把该放行口收窄为「确有表达式语法」（调用 / 下标 / 属性链），已不再是盲区。
+        ⇒ 本测试证明的是「相对旧谓词严格更强，且全树 0 命中」，
+          不是「任何形态的泄露都报」。
+
+    有意放宽的一类（旧谓词的假阳性）：纯散文里提到通用中文名词（文档句中的
+    「授权码」「密码」三个字），不承载任何取值，必须放行。旧谓词按子串匹配，
+    会把 6 行合法文档判红——那是**禁止产品必须产出的文档**的测试侧缺陷。
+    """
+
+
     PATTERNS = {
         "server_ip": "39" + ".105" + ".73.34",
         "sender_email_domain": "@" + "tsinghua.org.cn",
         "smtp_account": "libr" + "26",
         "real_name": "李博" + "冉",
-        "auth_code_word": "\u6388" + "\u6743" + "\u7801",
     }
     SKIP_DIRS = {"data", "__pycache__", ".git", ".mypy_cache", ".pytest_cache"}
     SKIP_FILES = {"verify_notes.md"}  # 扫描报告本身必须列出这些关键词
 
-    def test_07a_worktree_is_clean(self):
-        hits: list[str] = []
+    # 大写 env 键名（ASCII 拼写，大小写不敏感匹配，大小写后果交给 _is_credential）
+    ENV_NAMES = (
+        r"(?:ND_)?SMTP_(?:PASS|PASSWORD|AUTH|AUTHCODE|AUTH_CODE|TOKEN)"
+        r"|(?:ND_)?HMAC_SECRET"
+    )
+    # 英文同义写法与中文名词（与 Python 标识符不同形，无从严要求）
+    CRED_TOKEN = frozenset({
+        "pass", "passwd", "password", "passwords", "passphrase", "pwd",
+        "secret", "secrets", "token", "tokens", "key", "keys", "apikey",
+        "auth", "authcode", "authorization",
+        "credential", "credentials", "creds",
+    })
+    ENV_ONLY_RE = re.compile(ENV_NAMES)
+
+    CRED_CJK = ("授权码", "密码", "口令", "密钥", "凭据")
+    
+    _SPLIT = re.compile(r"[_.\-]")
+    PLACEHOLDER_RE = re.compile(r"^(|your-.*|<.*>|xxx+|placeholder|changeme|\.\.\.)$")
+    PLACEHOLDER_MARKERS = (
+        "placeholder", "not-a-real", "not_a_real", "changeme", "change-me", "change_me",
+        "dummy", "example", "sample", "fake", "unit-test", "unit_test", "selftest",
+        "self-test", "your-", "your_", "xxxx",
+    )
+    TYPE_NAMES = frozenset({
+        "str", "int", "bool", "float", "bytes", "bytearray", "path", "none", "any",
+        "dict", "list", "tuple", "set", "object", "optional", "callable", "iterable",
+    })
+    BOOL_NULL = frozenset({"true", "false", "none", "null", "nil"})
+    NUMERIC_RE = re.compile(r"^-?\d+(?:[.,]\d+)?$")
+    BARE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9!@#$%^&*_+/=~?@-]*$")
+    TRIM_TAIL = ",;)}]\u3002\uff0c\uff1b\uff09\u3011\u300b\u201d\u2019\u00b7\u2026.*`"
+    TRAILING_NONASCII = re.compile(r"[^\x00-\x7f]+\s*$")
+    
+    WORD = r"[A-Za-z0-9\u4e00-\u9fff]+"
+    CHAIN = rf"{WORD}(?:[_.\-]{WORD})*"
+    # R1：同行「键名 + 分隔符 + 取值」
+    ASSIGN_RE = re.compile(
+        rf"(?<![A-Za-z0-9_.\-])(?P<name>{CHAIN})(?P<q>[\"']?)\s*(?P<op>[=:\uff1a\uff1d])\s*(?P<rest>.*)$"
+    )
+    # R2：行首紧邻「键名 + 空白 + 取值」（仅中文名 / 含 _ - . 分隔的名启用）
+    ADJACENT_RE = re.compile(
+        rf"^\s*(?:export\s+|[-*]\s+|[\"'])?(?P<name>{CHAIN})(?P<q>[\"']?)\s+[\"']?(?P<rest>\S.*)$"
+    )
+    # 跨行：整行只有凭据键名（可带成对引号与尾随分隔符）
+    BARE_NAME_RE = re.compile(
+        rf"^\s*(?:export\s+|[-*]\s+|[\"'])?(?P<q>[\"']?)(?P<name>{CHAIN})(?P=q)\s*(?P<op>[=:\uff1a\uff1d])?\s*$"
+    )
+    ANNOT_RE = re.compile(r"^\s*(?P<t>[A-Za-z_][\w.]*(?:\[[^\]\n]*\])?)\s*=\s*(?P<v>.*)$")
+    PREFIX_RE = re.compile(r"^\s*(?:export\s+|[-*+]\s+|[{[]\s*)?[\"'`]?")
+    # 注释形态：`# <凭据键> <算子> <取值>`（注释掉的赋值同样是泄露；只取本行，
+    # 不跨行续读——注释是自足散文，续行不属于它）
+    COMMENT_ASSIGN_RE = re.compile(
+        rf"^\s*#+\s*(?P<name>{CHAIN})(?P<q>[\"']?)\s*"
+        rf"(?P<op>[=:\uff1a\uff1d])\s*(?P<rest>\S.*)$"
+    )
+    
+    # R5（本轮修复）：**行内任意位置**的「凭据键名 + 可选引号 + 算子 + 取值」。
+    # 位置放宽（不再要求键名落在行首键位），但**键位、算子、取值三层判定都不放宽**：
+    #   · 键位：只在「键位自明」时启用——① 中文名词键（授权码/密码/…），
+    #     或 ② 被标记界定（`` `key` `` / `**key**` / `| key |`）。纯 ASCII 裸键在行内
+    #     与代码关键字实参（裸键作实参）、散文模板（全大写键名）无法区分，故仍只认行首键位。
+    #   · 算子：只认 `=` `:` 全角 `＝` `：`（与行首键位同一条）。
+    #   · 取值：仍走同一套 _value / _unquote / _is_placeholder / judge_value 白名单判定。
+    # 仅在行首键位四种形态都未判定该行时才启用（见 _keypos_judge / credential_hits）。
+    INLINE_KEY_RE = re.compile(
+        rf"(?<![A-Za-z0-9_.\-])(?P<pre>[\"'`|*]?)(?P<name>{CHAIN})(?P<post>[`*|]{{0,2}})"
+    )
+    # 键位的「标记界定」字符（反引号 / 加粗星号 / 表格竖线）
+    # 键位的「标记界定」字符：反引号 / 加粗星号 / 表格竖线（用元组，避免空串 in 字符串恒真）
+    MARKUP_CHARS = (chr(96), chr(42), chr(124))
+    # ASCII 引号（双引号 + 单引号）：取值里出现即视为被截断/夹带的字符串片段
+    STRING_QUOTES = chr(34) + chr(39)
+    # 「代码片段」放行只保留给确有表达式语法的取值（调用 / 下标 / 属性链）
+    EXPR_CHARS = "()[]{}"
+    ATTR_CHAIN_RE = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$")
+
+    # ------------------------------------------------------------------ 键名判据
+    def _is_credential(self, name):
+        """名字是否「承载秘密」。中文标记须结尾；ASCII 词元逐段精确比对（避免 author/monkey）。"""
+        if any(name.endswith(m) for m in self.CRED_CJK):
+            return True
+        if any(m in name for m in self.CRED_CJK) and not name.isascii():
+            return False
+        segs = [s for s in self._SPLIT.split(name) if s]
+        return bool(segs) and segs[-1].lower() in self.CRED_TOKEN or any(
+            s.lower() in self.CRED_TOKEN for s in segs
+        )
+    
+    
+    def _last_segment_is_cred(self, name):
+        if any(name.endswith(m) for m in self.CRED_CJK):
+            return True
+        segs = [s for s in self._SPLIT.split(name) if s]
+        return bool(segs) and segs[-1].lower() in self.CRED_TOKEN
+    
+    
+    def needs_separator_for_adjacent(self, name):
+        """行首紧邻形态的启用条件：中文名或含 _ - . 分隔的名（纯小写单词要算子）。"""
+        return (not name.isascii()) or bool(self._SPLIT.search(name))
+    
+    
+    # ------------------------------------------------------------------ 取值判据
+    def strip_comment(self, raw):
+        m = re.search(r"(?:(?<=\s)|^)#.*$", raw)
+        return raw[: m.start()] if m else raw
+    
+    
+    def _value(self, raw):
+        """取值规范化：剥行尾注释 -> 裁尾随标点 -> 剥尾随非 ASCII -> 剥成对引号。"""
+        v = self.strip_comment(raw).strip()
+        v = v.rstrip(self.TRIM_TAIL).strip()
+        v = self.TRAILING_NONASCII.sub("", v).strip()
+        v = v.rstrip(self.TRIM_TAIL).strip()
+        return v
+    
+    
+    def _unquote(self, v):
+        stripped = False
+        for _ in range(2):
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'`":
+                v = v[1:-1].strip()
+                stripped = True
+        return v, stripped
+    
+    
+    def _is_placeholder(self, value):
+        v = value.strip()
+        if v == "":
+            return True
+        if self.PLACEHOLDER_RE.fullmatch(v):
+            return True
+        low = v.lower()
+        return any(mark in low for mark in self.PLACEHOLDER_MARKERS)
+    
+    
+    def _tail_of(self, rest):
+        """类型注解形态（`name: str = <v>` / `name: T = <v>`）取默认值；否则整体作为尾巴。"""
+        m = self.ANNOT_RE.match(rest)
+        return m.group("v") if m else rest
+    
+    
+    def judge_value(self, value, quoted, name):
+        """pass=放行；hit=报命中；skip=非取值形态（不参与判定）。"""
+        if value == "":
+            return "pass"
+        if self._is_placeholder(value):
+            return "pass"
+        if value.lower() in self.BOOL_NULL:
+            return "skip"
+        if not quoted and self.NUMERIC_RE.fullmatch(value) and not self._last_segment_is_cred(name):
+            return "skip"
+        if quoted:
+            return "hit"
+        # 本轮修复（F2）：承载秘密的键之下，取值**不再**因含 `.` `:` `@` `-` `+` 等标点
+        # 被判为「代码片段/标识符」而放行——那会让「未加引号、含点的取值」逃逸，而同一
+        # 取值加了引号就命中：真正在起作用的是引号，不是「像不像代码」。
+        # 但旧 BARE_RE 里有一条**结构性**要求必须留下：取值是**单个 token**
+        # （不含空白、不含引号；含空白的是散文、含引号的是被截断的字符串片段）。
+        # 这一条不比基线更松：基线的 BARE_RE 同样拒绝含空白/引号的取值。
+        if re.search(r"\s", value) or any(ch in value for ch in self.STRING_QUOTES):
+            return "skip"
+        if not re.search(r"[A-Za-z0-9\u4e00-\u9fff]", value):
+            return "skip"  # 纯标点不是取值（与基线 BARE_RE 首字符要求一致）
+        if "://" in value:
+            return "skip"  # URL 形态（与基线一致，见文档盲区 ⑪）
+        if value.lower() in self.TYPE_NAMES:
+            return "skip"
+        # 「代码片段」放行只保留给**确有表达式语法**的取值（调用 / 下标 / 属性链）
+        if self._is_expression(value, name):
+            return "skip"
+        return "hit"
+    
+    
+    def _is_expression(self, value, name):
+        """确有表达式语法的取值才放行——原 BARE_RE「代码片段」放行的唯一继承者。"""
+        if any(ch in value for ch in self.EXPR_CHARS):
+            return True
+        return "." in name and self.ATTR_CHAIN_RE.fullmatch(value) is not None
+
+    def _inline_op_value(self, rest):
+        """行内算子形态的取值：成对引号字面量优先，否则算子右侧**第一个词**。"""
+        s = rest.strip()
+        if not s:
+            return None
+        # 成对引号且内容不含空白/引号（`"abc.def123"`）；含空白的是代码片段（`" + real + "`）
+        m = re.match(r"([\"'`])([^\s\"'`]*)\1", s)
+        if m:
+            v = self._value(m.group(2))
+            return (v, True) if v else None
+        tok = re.split(r"[\s|]", s, maxsplit=1)[0]
+        if not re.search(r"[A-Za-z0-9\u4e00-\u9fff]", tok):
+            return None
+        v = self._value(tok)
+        return (v, False) if v else None
+
+    def _inline_adj_value(self, rest):
+        """行内紧邻形态（无算子）的取值：整段残余必须是单个字面取值。
+        含内部空白的残余是散文描述（如 markdown 表格里的「SMTP 授权码（…）」），不是取值。"""
+        s = rest.strip().strip("|").strip().strip("*").strip()
+        if not s or re.search(r"\s", s):
+            return None
+        s = s.strip("`").strip()
+        v, q = self._unquote(self._value(s))
+        if v == "" or re.search(r"[\"']", v):
+            return None
+        return (v, q)
+
+    def _inline_hit(self, line):
+        """行首键位未命中时的行内回退：位置放宽，键位/算子/取值判定不放宽。"""
+        for m in self.INLINE_KEY_RE.finditer(line):
+            name = m.group("name")
+            if not self._is_credential(name):
+                continue
+            markup = m.group("pre") in self.MARKUP_CHARS or bool(m.group("post"))
+            if not markup and name.isascii():
+                continue  # 键位不自明（ASCII 裸键在行内同代码/散文无法区分）
+            tail = line[m.end():]
+            mo = re.match(r"\s*(?P<op>[=:\uff1a\uff1d])\s*(?P<rest>\S.*)$", tail)
+            if mo:
+                iv = self._inline_op_value(mo.group("rest"))
+            elif markup or self.needs_separator_for_adjacent(name):
+                ma = re.match(r"\s+(?P<rest>\S.*)$", tail)
+                iv = self._inline_adj_value(ma.group("rest")) if ma else None
+            else:
+                iv = None
+            if iv and self.judge_value(iv[0], iv[1], name) == "hit":
+                return True
+        return False
+
+    def _next_value(self, lines, idx):
+        """跨行形态：取紧随行的取值（无紧随行返回 None）。"""
+        if idx >= len(lines):
+            return None
+        nxt = lines[idx].strip()
+        if not nxt or nxt.startswith("#"):
+            return ("", False, nxt)
+        v, q = self._unquote(self._value(nxt))
+        if re.search(r"[:：＝]", v):
+            return ("", False, nxt)
+        v, q = self._unquote(self._value(nxt))
+        return (v, q, nxt)
+    
+    
+    # ------------------------------------------------------------------ 扫描
+    def _keypos_judge(self, line, lines, lineno):
+        """行首键位四种形态（原谓词路径，逐字保留）。返回 (是否已判定, 是否命中)：
+        「已判定」为真时不再进入行内回退——位置放宽不得让同一行被两套路径重复判。"""
+        mc = self.COMMENT_ASSIGN_RE.match(line)
+        if mc and self._is_credential(mc.group("name")):
+            name = mc.group("name")
+            v, q = self._unquote(self._value(mc.group("rest")))
+            return (True, self.judge_value(v, q, name) == "hit")
+        m = self.ASSIGN_RE.match(line, self.PREFIX_RE.match(line).end())
+        if m and self._is_credential(m.group("name")):
+            name = m.group("name")
+            v, q = self._unquote(self._value(self._tail_of(m.group("rest"))))
+            kind = self.judge_value(v, q, name)
+            if kind == "pass" and v == "":
+                nv = self._next_value(lines, lineno)
+                if nv and nv[0]:
+                    kind = self.judge_value(nv[0], nv[1], name)
+            return (True, kind == "hit")
+        mb = self.BARE_NAME_RE.match(line)
+        if mb and self._is_credential(mb.group("name")):
+            name = mb.group("name")
+            nv = self._next_value(lines, lineno)
+            kind = "pass"
+            if nv and nv[0]:
+                kind = self.judge_value(nv[0], nv[1], name)
+            elif nv and not nv[2]:
+                kind = "pass"
+            hit = kind == "hit" or (
+                kind == "skip"
+                and self.needs_separator_for_adjacent(name)
+                and mb.group("op") is None
+            )
+            return (True, hit)
+        ma = self.ADJACENT_RE.match(line)
+        if ma and self._is_credential(ma.group("name")):
+            name = ma.group("name")
+            if self.needs_separator_for_adjacent(name):
+                v, q = self._unquote(self._value(ma.group("rest")))
+                return (True, self.judge_value(v, q, name) == "hit")
+            return (True, False)
+        return (False, False)
+
+    def credential_hits(self, rel, text):
+        lines = text.splitlines()
+        out = []
+        for i, line in enumerate(lines):
+            lineno = i + 1
+            consumed, hit = self._keypos_judge(line, lines, lineno)
+            if consumed:
+                if hit:
+                    out.append(f"{rel}:{lineno} [credential_assignment] {line.strip()}")
+                continue
+            if self._inline_hit(line):
+                out.append(f"{rel}:{lineno} [credential_assignment] {line.strip()}")
+        return out
+
+    def scan_tree(self, root=None, skip_dirs=None, skip_files=None):
+        root = ROOT if root is None else root
+        skip_dirs = self.SKIP_DIRS if skip_dirs is None else skip_dirs
+        skip_files = self.SKIP_FILES if skip_files is None else skip_files
+        import pathlib
+    
+        root = pathlib.Path(root)
         scanned = 0
-        for path in sorted(ROOT.rglob("*")):
+        hits = []
+        for path in sorted(root.rglob("*")):
             if not path.is_file():
                 continue
-            rel = path.relative_to(ROOT)
-            if any(part in self.SKIP_DIRS for part in rel.parts):
-                continue
-            if path.name in self.SKIP_FILES:
+            rel = path.relative_to(root)
+            if any(p in skip_dirs for p in rel.parts) or path.name in skip_files:
                 continue
             try:
                 text = path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
             scanned += 1
-            for label, needle in self.PATTERNS.items():
-                if needle in text:
-                    for lineno, line in enumerate(text.splitlines(), 1):
-                        if needle in line:
-                            hits.append(f"{rel}:{lineno} [{label}] {line.strip()[:120]}")
+            hits.extend(self.scan_text(str(rel), text))
+        return scanned, hits
+
+    def scan_text(self, rel, text):
+        """真值模式层（D1）+ 凭据赋值层（D2/D3）：scan_tree 的唯一入口。"""
+        out = []
+        for label, needle in self.PATTERNS.items():
+            if needle in text:
+                for i, line in enumerate(text.splitlines()):
+                    if needle in line:
+                        out.append("%s:%d [%s] %s" % (rel, i + 1, label, line.strip()))
+                        break
+        out.extend(self.credential_hits(rel, text))
+        return out
+
+    # 「像机器生成」启发式：已降级，只服务 07b 对**非凭据键**的体检，
+    # 绝不参与凭据键是否命中的判定（旧谓词把它当主判据，正是净回归的根因）。
+    def _looks_generated(self, value):
+        if len(value) < 8:
+            return False
+        return any(ch.isdigit() for ch in value)
+    def test_07a_worktree_is_clean(self):
+        scanned, hits = self.scan_tree()
         self.assertEqual(hits, [], "凭据/隐私扫描命中：\n" + "\n".join(hits))
         self.assertGreater(scanned, 5, "扫描文件数异常，怀疑路径写错")
-        print(f"\n[SCAN] 扫描 {scanned} 个文本文件，0 命中（{sorted(self.PATTERNS)}）")
+        labels = sorted(self.PATTERNS) + ["credential_assignment"]
+        print(f"\n[SCAN] 扫描 {scanned} 个文本文件，0 命中（判据：{labels}）")
 
     def test_07b_env_example_placeholders_only(self):
         example = ROOT / ".env.example"
         if not example.exists():
-            self.skipTest(".env.example 尚不存在（属 deploy 任务范畴，本项记为 suspect）")
+            self.skipTest(".env.example 尚不存在（属 deploy 任务范畴）")
         text = example.read_text(encoding="utf-8", errors="ignore")
         for label, needle in self.PATTERNS.items():
             self.assertNotIn(needle, text, f".env.example 含真实值 [{label}]")
+        self.assertEqual(
+            self.credential_hits(".env.example", text),
+            [],
+            ".env.example 含赋值形态的真实凭据值",
+        )
         for line in text.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
                 continue
-            value = line.split("=", 1)[1].strip().strip("'\"")
-            self.assertRegex(
-                value, r"^(|your-|<.*>|xxx+|placeholder|changeme|\.\.\.)$",
-                f".env.example 的 {line.split('=')[0]} 取值不像占位符：{value!r}",
-            )
-        print("\n[SCAN] .env.example 仅含占位符")
+            key, raw = stripped.split("=", 1)
+            key = key.strip()
+            value = self._value(raw)
+            if self.ENV_ONLY_RE.fullmatch(key):
+                self.assertTrue(
+                    self._is_placeholder(value),
+                    f".env.example 的凭据键 {key} 取值不是占位符：{value!r}",
+                )
+            else:
+                self.assertFalse(
+                    self._looks_generated(value),
+                    f".env.example 的非凭据键 {key} 取值像机器生成的秘密：{value!r}",
+                )
+        print("\n[SCAN] .env.example 仅含占位符（凭据键全为占位符，其余键无生成形态取值）")
+
+    def test_07c_credential_predicate_semantics(self):
+        """谓词语义自证（逐例钉死）：相对旧谓词更强，且不是放宽换绿灯。
+
+        每条都注明它属于哪种逃逸形态：红例必红、绿例必绿，逐例 assert。
+        """
+        noun = "\u6388" + "\u6743" + "\u7801"
+        real = "Kx7" + "Qm2Zp9Lw4"      # 机器生成形态样例，非仓库内任何真实值
+        word = "realthing"              # 词形取值：旧谓词正是漏掉这一整类
+        cases = [
+            # ---- E1 键名放宽：旧谓词只认英文 authcode 与中文名词，以下旧谓词全漏 ----
+            ("ND_SMTP_PASS" + "=" + real, True, "E1 大写 env 键名"),
+            ("smtp_pass" + "=" + real, True, "E1 小写键名"),
+            ("SMTP_PASSWORD" + "=" + real, True, "E1 password 全拼"),
+            ("DB_SECRET" + "=" + real, True, "E1 secret 段"),
+            ("api_key" + "=" + real, True, "E1 api_key 下划线"),
+            ("AUTH_TOKEN" + "=" + real, True, "E1 auth 与 token 双段"),
+            ("SMTP_AUTH_CODE" + "=" + real, True, "E1 auth_code"),
+            ("ND_HMAC_SECRET" + "=" + real, True, "E1 ND_ 前缀 + HMAC"),
+            ("smtp-pass" + "=" + real, True, "E1 连字符分隔"),
+            ("smtp.pass" + "=" + real, True, "E1 点分隔"),
+            ("credential" + "=" + real, True, "E1 credential 词元"),
+            ("SMTP_PASSWD" + "=" + real, True, "U passwd 词元"),
+            ("mail_pass" + "=" + real, True, "Z pass 段"),
+            # ---- E2 中文键名（含全角算子与无算子紧邻）----
+            (noun + "=" + real, True, "E2 中文标记 + 等号"),
+            (noun + "\uff1a" + real, True, "E2 全角冒号"),
+            (noun + "\uff1a" + real + "\u3002", True, "E2 尾随散文句号仍须命中"),
+            (noun + " " + real, True, "E2 无算子紧邻"),
+            (noun + "\uff1a'" + real + "'", True, "L6 中文键 + 单引号"),
+            # ---- E3 注释形态：注释掉的赋值同样是泄露 ----
+            ("#" + noun + "=" + real, True, "E3 注释形态 + 等号"),
+            ("# " + noun + "=" + real + "\u3002", True, "E3 注释形态 + 尾随句号"),
+            # ---- E4 算子 / 引号 / 容器 ----
+            ("ND_SMTP_PASS" + "\uff1d" + real, True, "E4 全角等号"),
+            ("ND_SMTP_PASS" + " : " + real, True, "E4 空格环绕 + 半角冒号"),
+            ("ND_SMTP_PASS" + '="' + real + '"', True, "E4 双引号包裹"),
+            ("ND_SMTP_PASS" + "='" + real + "'", True, "E4 单引号包裹"),
+            ('{"smtp_pass": "' + real + '"}', True, "K2 JSON 对象"),
+            ("{'smtp_pass': '" + real + "'}", True, "K4 单引号 dict"),
+            ("export ND_SMTP_PASS='" + real + "'", True, "E4 shell export"),
+            ("- ND_SMTP_PASS=" + real, True, "E4 列表项"),
+            # ---- E5 尾随标点与行尾注释 ----
+            ("ND_SMTP_PASS=" + real + ",", True, "J3 尾随逗号"),
+            ('password = "' + real + '",', True, "H 引号 + 尾随逗号"),
+            ("ND_SMTP_PASS=" + real + ";", True, "尾随分号"),
+            ("ND_SMTP_PASS=" + real + ")", True, "尾随右括号"),
+            ("ND_SMTP_PASS=" + real + "  # 备注", True, "AA 行尾注释"),
+            ("hmac_secret" + "=" + real, True, "G2 hmac_secret 必红"),
+            # ---- E6 词形取值：旧谓词因「不像随机串」而放行的净回归 ----
+            ("hmac_secret" + "=" + word, True, "G2b 词形取值也必红"),
+            ("smtp_pass" + "=" + word, True, "D 小写键 + 词形取值（旧谓词漏）"),
+            ("smtp_pass" + ": " + word, True, "D5 冒号 + 词形取值（旧谓词漏）"),
+            ("PASSWORD" + "=" + word, True, "P2 纯大写 PASSWORD + 词形取值"),
+            ("smtp-pass" + ": " + real, True, "V2 连字符 + 冒号"),
+            ("password" + ": " + real, True, "H2 password 冒号"),
+            ("passwd" + "=" + real, True, "H3 passwd"),
+            ("secret" + " = " + real, True, "H4 secret 空格环绕"),
+            ("token" + " = " + real, True, "H5 token"),
+            # ---- E7 跨行取值：键名行 + 紧随行 ----
+            (noun + "\n" + real, True, "M2 键名行 + 紧随行取值"),
+            ("ND_SMTP_PASS" + "=" + "\n" + real, True, "M2b 等号后换行再取值"),
+            (noun + "\uff1a" + "\n" + real, True, "M2c 全角冒号后换行"),
+            ("smtp_pass" + "\n" + real, True, "M2d 小写键名 + 跨行"),
+            (noun + "  \n  " + real, True, "M2e 键名行带缩进与尾随空白"),
+            ("hmac_secret" + "\n" + real, True, "M2f 跨行 + 非生成形态"),
+            # ---- 绿例：占位符 / 非凭据键 / 注解 / 代码片段 ----
+            ("ND_SMTP_PASS" + "=", False, "空值"),
+            ("ND_SMTP_PASS" + "=your-" + "smtp-auth-code", False, "your- 占位"),
+            ("ND_SMTP_PASS" + "=<" + noun + ">", False, "<...> 占位"),
+            ("ND_SMTP_PASS" + "=placeholder", False, "placeholder 占位"),
+            ("ND_SMTP_PASS" + "=xxx", False, "xxx 占位"),
+            ("ND_SMTP_PASS" + "=...", False, "省略号占位"),
+            ("ND_SMTP_PORT" + "=465", False, "F2 非凭据键 + 纯数值（披露项 1）"),
+            ("smtp_pass" + ": str = " + '""', False, "F3 Python 注解 + 空串默认值"),
+            ("smtp_pass" + ": str", False, "F3b 注解无取值"),
+            ("hmac_secret" + ": str", False, "注解无取值"),
+            ("password" + ": str = " + "None", False, "注解默认 None"),
+            ("smtp_pass" + "=" + 'opt("ND_' + "SMTP" + '_PASS", "")', False, "代码片段不是取值"),
+            ("# " + noun + "见密码管理器", False, "X 散文提及：只说在哪、不给值"),
+            (noun + "\uff1a" + "your-auth-code", False, "Y 占位取值 + 中文键"),
+            # ---- 绿例：产品必须产出的 6 行合法文档（旧谓词的假阳性，不得改写文档）----
+            ("# 本文件只列**键名与含义**，不放任何真实账号、" + noun + "、密钥。", False, "披露项 4 文档行 1"),
+            ("# SMTP " + noun + " / 密码（**这是唯一必须手工填入的敏感项**）", False, "披露项 4 文档行 2"),
+            ("cp .env.example .env && chmod 0600 .env   # 然后手工填入 SMTP 账号与" + noun, False, "披露项 4 文档行 3"),
+            ("| `ND_SMTP_PASS` | SMTP " + noun + "（**唯一必须手工填的敏感项**） |", False, "披露项 4 文档行 4"),
+            ("    warn \"已从 .env.example 生成 $APP_DIR/.env（占位值）——**必须**填入真实 SMTP 账号/" + noun + "后再运行\"", False, "披露项 4 文档行 5"),
+            ("     必填项见 $APP_DIR/.env.example 的注释；确认真实 SMTP 账号/" + noun + "已填入。", False, "披露项 4 文档行 6"),
+            # ---- 本轮（r3）新闭合类：行内回退必须命中（位置放宽，算子与取值判定不放宽）----
+            # A 组：中文名词不在行首键位
+            ("SMTP " + noun + "\uff1a" + real, True, "R3-A1 中文名在行内（前缀 SMTP）"),
+            ("SMTP " + noun + ": " + real, True, "R3-A2 中文名在行内 + 半角冒号"),
+            ("SMTP " + noun + " " + real, True, "R3-A3 中文名在行内 + 无算子紧邻"),
+            ("\u90ae\u7bb1 " + noun + "\uff1a" + real, True, "R3-A4 中文名在行内（前缀中文）"),
+            ("\uff08" + noun + "\uff1a" + real + "\uff09", True, "R3-A5 中文名在行内 + 中文括注"),
+            # B 组：未加引号且含标点的取值（旧谓词的「代码片段」放行口）
+            ("ND_SMTP_PASS" + "=" + "abc.def123", True, "R3-B1 未引号 + 点"),
+            ("ND_SMTP_PASS" + "=" + "P@ssw0rd.2026", True, "R3-B2 未引号 + @"),
+            ("ND_SMTP_PASS" + "=" + "abc:def123", True, "R3-B3 未引号 + 冒号"),
+            ("ND_SMTP_PASS" + "=" + "abc.def123.", True, "R3-B4 未引号 + 尾随点"),
+            ("smtp_pass" + "=" + "abc.def123", True, "R3-B5 小写键 + 点"),
+            ("hmac_secret" + "=" + "a.b1c2d3", True, "R3-B6 属性链形态取值也必须报"),
+            ("smtp_pass" + ": " + "abc.def123", True, "R3-B7 冒号 + 点"),
+            # C 组：markdown 表格 / 反引号 / 加粗键名
+            ("| `ND_SMTP_PASS` | " + real + " |", True, "R3-C1 表格行值列"),
+            ("| `smtp_pass` | `" + real + "` |", True, "R3-C2 表格行 + 反引号值"),
+            ("**smtp_pass**" + ": " + real, True, "R3-C3 加粗键名 + 冒号"),
+            ("**ND_SMTP_PASS**" + "=" + real, True, "R3-C4 加粗键名 + 等号"),
+            # 本轮新披露的放行面（必须继续放行，且是收窄后的表达式口）
+            ("self.password" + " = " + "self.cfg.password", False, "R3-G2 属性链赋值不是字面取值"),
+        ]
+        for text, expect, why in cases:
+            hits = self.credential_hits("probe.txt", text)
+            self.assertEqual(bool(hits), expect, f"{why}：{text!r} → {hits}")
+        # 命中行必须带「文件:行号」前缀与判据标签（下游靠它定位）
+        first = self.credential_hits("probe.txt", "ND_SMTP_PASS" + "=" + real)
+        self.assertTrue(first)
+        self.assertTrue(first[0].startswith("probe.txt:1 "), first)
+        self.assertIn("[credential_assignment]", first[0])
+        # 反向对照（反证）：_looks_generated 已不在命中路径上
+        self.assertTrue(self._looks_generated(real), "样例本身满足旧「生成形态」启发式")
+        self.assertTrue(
+            self.credential_hits("probe.txt", "hmac_secret" + "=" + "s3cret"),
+            "短且非生成形态的真实值也必须报：证明命中不再由 _looks_generated 决定",
+        )
+        print(f"\n[SCAN] 谓词语义自证 {len(cases)} 例全过（含跨行取值与注释形态）")
+
+    def test_07d_truth_patterns_still_live(self):
+        """4 个真值模式逐个注入项目外临时树 ⇒ 必须命中并带 label（证明未削弱）。"""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for label, needle in self.PATTERNS.items():
+                probe = Path(tmp) / f"{label}.txt"
+                probe.write_text("无害前缀 " + needle + " 无害后缀\n", encoding="utf-8")
+            scanned, hits = self.scan_tree(Path(tmp))
+            self.assertEqual(scanned, len(self.PATTERNS), "临时树扫描文件数异常")
+            for label in self.PATTERNS:
+                self.assertTrue(
+                    any(f":1 [{label}] " in hit for hit in hits),
+                    f"[{label}] 注入真值未命中：{hits}",
+                )
+            print(f"\n[SCAN] 4 个真值模式在项目外副本上逐个命中（{len(hits)} 条）")
 
 
 # ------------------------------------------------------------------- 辅助

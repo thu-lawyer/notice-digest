@@ -14,12 +14,17 @@
     **带该 cookie 原样重放一次**即可 200。cookie 在同一运行内跨请求复用
     （列表第 1 页拿到的 cookie 供后续列表页与详情端点共用），所以整轮抓取只在
     第一次请求上付一次 403 的代价。
+  * **不走系统代理**：只认显式环境变量（http_proxy/https_proxy），忽略操作系统
+    级代理设置。macOS 的系统代理经 ``_scproxy`` 被 urllib 默认读走，而站点是
+    国内直连可达的；一旦系统代理的 TLS 隧道不通，整轮抓取会死在
+    SSL UNEXPECTED_EOF 上（不是 403，也不是超时）。详见 ``_proxy_handler``。
 """
 
 from __future__ import annotations
 
 import http.cookiejar
 import json
+import os
 import time
 import urllib.error
 import urllib.parse
@@ -57,6 +62,36 @@ def _resolve_prefix(campus: str) -> str:
     return CAMPUS_PREFIXES.get(key, key)
 
 
+#: 最低层传输打桩点：离线测试直接替换 ``urllib.request.urlopen`` 即可拦下真实请求
+#: （``tests/test_integration.py`` 的致命退出码分级用例就打在这里，好让重试循环、
+#: JSON 解析、异常归类**真实执行**）。``Session.open`` 只在它被替换过时才改走它，
+#: 默认仍走本会话 opener —— 也就是 cookie jar + 只认环境变量的代理策略。
+_STDLIB_URLOPEN = urllib.request.urlopen
+
+
+def _proxy_handler() -> urllib.request.ProxyHandler:
+    """只认显式环境变量代理，忽略操作系统级代理设置。
+
+    ``build_opener()`` 不带参数时会用 ``urllib.request.getproxies()``，它在
+    macOS 上会去读系统网络设置的代理（``_scproxy``）——那是 GUI 层面的开关，
+    抓取端既看不见也管不着。pkuknow.cn 是国内站点、直连可达，把抓取链路交给
+    系统代理只会引入一个不可控的单点（本轮实测：系统代理开着但隧道重置，
+    所有请求死在 ``SSL: UNEXPECTED_EOF_WHILE_READING``）。
+
+    部署机通常是 Linux 服务器（systemd timer），那里既没有系统代理也没有
+    环境变量代理，行为与从前完全一致；需要走代理的部署用 ``https_proxy``
+    显式指定即可。
+    """
+    proxies: dict[str, str] = {}
+    for scheme in ("http", "https"):
+        for name in (f"{scheme}_proxy", f"{scheme.upper()}_PROXY"):
+            value = os.environ.get(name)
+            if value:
+                proxies[scheme] = value
+                break
+    return urllib.request.ProxyHandler(proxies)
+
+
 class Session:
     """一次运行内的访客会话：一个 cookie jar + 一个基于它的 opener。
 
@@ -70,7 +105,7 @@ class Session:
             policy if policy is not None else http.cookiejar.DefaultCookiePolicy()
         )
         self.opener = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(self.jar)
+            _proxy_handler(), urllib.request.HTTPCookieProcessor(self.jar)
         )
 
     @property
@@ -85,8 +120,39 @@ class Session:
         ``Set-Cookie`` 必须自己兜住，否则拿不到会话 cookie，重放照样 403。
         """
         before = len(self.jar)
-        self.jar.extract_cookies(response, request)
+        try:
+            self.jar.extract_cookies(response, request)
+        except AttributeError:
+            # 离线打桩用的假响应壳没有 ``info()``，无从提取；真实响应（含
+            # ``HTTPError``）都实现该协议，实际链路上不会因此静默丢 cookie。
+            return before
         return before
+
+    def open(self, request: urllib.request.Request, timeout: int):
+        """最低层传输 + cookie 归档，返回响应对象（HTTPError 原样抛出）。
+
+        默认走本会话 opener（``_proxy_handler()`` 的代理策略 + cookie jar）。
+        唯一例外是**被替换过的** ``urllib.request.urlopen``：那是有意的离线打桩点，
+        尊重它才能让重试循环、JSON 解析、异常归类真实执行，也才让调用方在
+        ``urllib.request.urlopen`` 这一层打的桩继续生效。
+        """
+        transport = urllib.request.urlopen
+        try:
+            if transport is _STDLIB_URLOPEN:
+                response = self.opener.open(request, timeout=timeout)
+            else:
+                response = transport(request, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            # 处理器链里 HTTPErrorProcessor 与 HTTPCookieProcessor 的先后不是契约，
+            # 4xx/5xx 响应里的 Set-Cookie 自己再兜一遍（重复收同一条是幂等的）。
+            self.store_response_cookies(request, exc)
+            raise
+        self.store_response_cookies(request, response)
+        return response
+
+    def get(self, url: str, *, timeout: int = 20):
+        """按 URL 发一次 GET（会话级入口，带 UA/Accept 头），返回响应对象。"""
+        return self.open(_build_request(url), timeout)
 
 
 _DEFAULT_SESSION = Session()
@@ -128,18 +194,23 @@ def _retry_after_seconds(response) -> float:
     return max(0.0, min(seconds, _MAX_RETRY_AFTER))
 
 
-def _read_json(session: Session, url: str, timeout: int) -> dict:
-    """发一次请求并解析 JSON；HTTPError 原样抛出（附带本次收下的 cookie 数）。"""
-    req = _build_request(url)
+def _session_cookie_delivered(response) -> bool:
+    """这次响应是否下发了 ``Set-Cookie``（⇒ 值不值得带 cookie 重放）。
+
+    **不能**用「jar 里多了几条」当判据：``HTTPCookieProcessor`` 通常已先把
+    403 响应的 ``Set-Cookie`` 收进 jar，事后再看增量恒为 0。判据必须落在响应头。
+    """
     try:
-        with session.opener.open(req, timeout=timeout) as resp:
-            session.store_response_cookies(req, resp)
-            raw = resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as exc:
-        before = session.store_response_cookies(req, exc)
-        # 这次 403 是否真的带来了（新）会话 cookie —— 决定值不值得重放。
-        exc.nd_cookie_delta = len(session.jar) - before  # type: ignore[attr-defined]
-        raise
+        values = response.headers.get_all("Set-Cookie") or []
+    except AttributeError:  # pragma: no cover - 假响应壳没有 headers
+        return False
+    return bool(values)
+
+
+def _read_json(session: Session, url: str, timeout: int) -> dict:
+    """发一次请求并解析 JSON；HTTPError 原样抛出（cookie 归档在 ``Session.open``）。"""
+    with session.get(url, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
     data = json.loads(raw)
     if not isinstance(data, dict):
         raise FetchError(f"返回的不是 JSON 对象: {url}")
@@ -155,7 +226,7 @@ def _get_json(url: str, timeout: int, retries: int, session: Session | None = No
             return _read_json(sess, url, timeout)
         except urllib.error.HTTPError as exc:
             last_err = FetchError(f"HTTP {exc.code} for {url}")
-            if exc.code == 403 and getattr(exc, "nd_cookie_delta", 0) > 0:
+            if exc.code == 403 and _session_cookie_delivered(exc) and sess.has_cookies:
                 # —— 访客会话闸门 ——
                 # 冷请求的 403 响应里站点已下发访客会话 cookie（cookiejar 已收下），
                 # 带 cookie 原样重放 **一次**（同一运行内），随后无论成败都收手：
