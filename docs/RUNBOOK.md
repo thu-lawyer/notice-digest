@@ -145,7 +145,7 @@ location /nd/ {
 | 2 | **反馈令牌没有 `exp`** | HMAC 令牌不含过期时间 | 令牌一旦泄露可长期复用 | 令牌只出现在用户自己的邮件里；如需收紧，加 `exp` 并同步改签名/校验两侧 |
 | 3 | **反馈端点自身无速率限制** | `feedback-serve` 内部不做限流 | 公网暴露后可能被刷 | **必须由 nginx 侧限流**（见第 7 节：`location /nd/` 必须带 `limit_req`）；同时服务只监听 127.0.0.1 |
 | 4 | **远期日期落 `undated`** | 超出分区窗口的日期不进入「本周/下周」 | 条目仍在，只是分区不精确 | 低危；分区窗口如需扩展，改 `BUCKET_ORDER` 相关逻辑 |
-| 5 | **生产不配公网基址就没有反馈按钮** | `ND_FEEDBACK_BASE` 为回环地址时不渲染 👍/👎 | 反馈回路静默失效（**是安全降级，不是 bug**） | 生产 `.env` 必须同时设置 `ND_FEEDBACK_BASE`（公网可达）与 `ND_HMAC_SECRET` |
+| 5 | **反馈按钮的渲染只判「基址是否为空」，不判是否回环** | `ND_FEEDBACK_BASE` **为空**（或 `ND_HMAC_SECRET` 为空）才不渲染 👍/👎；**配成回环地址时按钮照渲染，href 指向 `127.0.0.1`** | 比「没有按钮」更糟：用户点得下去，但点开必然打不开（2026-10-09 当天就是这样） | 生产 `.env` 必须同时设置 `ND_FEEDBACK_BASE`（**外部可达、非回环**）与 `ND_HMAC_SECRET`；判据与证据见第 15、18.6、18.8 节 |
 
 ### 12.1 时间解析完全依赖限速详情端点
 
@@ -208,7 +208,7 @@ location /nd/ {
 
 ## 15. 反馈入口的公网基址：三个候选（未决，本轮明确不做）
 
-前置事实：`/opt/notice-digest/.env` 的 `ND_FEEDBACK_BASE` 仍为回环地址，故**当前邮件里不渲染 👍/👎 按钮** —— 这是第 12 节第 5 项的安全降级，**不是故障**。要让反馈回路可用，须先决定公网基址：
+前置事实（2026-10-09 复核，**推翻本文档早先的写法**）：`/opt/notice-digest/.env` 的 `ND_FEEDBACK_BASE` 是**回环地址、但非空**，而 `render.py::_feedback_links`（L208–L217）只判「基址是否为空」与「`hmac_secret` 是否为空」——**全文件没有 loopback / 127.0.0.1 特判**（`grep -niE 'loopback|127\.0\.0\.1|localhost'` 零命中）。因此生产配置下**邮件照常渲染 👍/👎 与标题点击链接，href 全部指向 `http://127.0.0.1:8791/nd/...`**；用户点开的是自己电脑的回环地址，必然无效。**这不是「安全降级」，是渲染了一条用户侧必然打不开的链接。** 要让反馈回路可用，须先决定公网基址：
 
 | 候选 | 做法 | 前置条件 | 代价 / 风险 |
 | --- | --- | --- | --- |
@@ -385,3 +385,194 @@ cd <云盘>/zcode/notice-digest
 - **不要把首发序号当常数**：二手 #61 / 本轮 #35，取决于突发开始时的剩余额度（**假设未实测**）。撞到 429 时按 `Retry-After` 收批（实测 1.0 s；实现上限 `RATE_LIMIT_BACKOFF_CAP = 30.0`），未补全条目留 pending、下一轮自动重试；**更不要**因为撞了一次墙就加大批量或改断言。
 - **再测的纪律（若确实需要）**：一次突发（约 5 次/秒、上限 ≤70）+ 恰好两次恢复探测（+60 s / +300 s）即够；同一时间窗内不要叠加其他探针或真实抓取，否则首发序号无法解释。
 - **不要为了「看起来干净」而过滤未补全条目**：未补全条目会落「时间待定」但仍在邮件里（第 12.1 节）。
+
+## 18. 反馈入口公网开通：`nd.thulaw.top` 的实测状态、硬前置与逐类返回码（t32）
+
+**结论先行（2026-10-09 10:47 更新）：公网入口仍未开通。** 第一道硬前置（DNS A 记录）**已解决**：`nd.thulaw.top` → `<服务器公网 IP>`，服务器本地 `getent`、`@114.114.114.114`、`@1.1.1.1`、权威 NS `@dns15.hichina.com` 四处一致。但随即暴露**第二道硬前置：域名未 ICP 备案** —— 阿里云在边缘按 Host/SNI 拦截该域名（80 返回备案拦截页、443 直接重置，详见 §18.8）。因此 **§18.3 的四步目前一步都走不了**：`certbot --nginx` 的 HTTP-01 挑战已被实测否决（staging 原文见 §18.3），`.env` 也**刻意没有**切 `https://nd.thulaw.top`（切了只会让下一封邮件渲染出打不开的按钮）。所有与域名无关的准备（vhost 复核、限流区复核、certbot 可用性、服务重启与健康检查、逐类返回码实测、零写信证明）**已完成并留证**。
+
+### 18.1 公网拓扑（现状，逐字对照磁盘）
+
+```
+邮件客户端 / 浏览器
+  └─ https://nd.thulaw.top/nd/{f,c,health}      ← 待 certbot 签发后才成立
+       └─ nginx: server_name nd.thulaw.top        /etc/nginx/sites-enabled/notice-digest.conf
+            location /nd/                         limit_req zone=nd_feedback burst=20 nodelay;
+                                                  limit_req_status 429;
+                                                  proxy_pass http://127.0.0.1:8791;
+            location /                            return 404
+       └─ notice-feedback.service (Type=simple)   仅监听 127.0.0.1:8791
+            基址来自 /opt/notice-digest/.env 的 ND_FEEDBACK_BASE
+```
+
+限流区在 `/etc/nginx/conf.d/notice-digest-ratelimit.conf`（`limit_req_zone` 属 http 上下文、`location` 属 server 上下文，故必须拆成两个文件）。**复核结果（2026-10-09）**：vhost 目前只有 `listen 80`（无 443 段，certbot `--nginx` 会补），`nginx -t` = syntax is ok / test is successful；`location /nd/` 的反代目标与 `Host` / `X-Real-IP` / `X-Forwarded-For` / `X-Forwarded-Proto` / `User-Agent` 头均正确。
+
+### 18.2 DNS 是硬前置（两轮独立实测，当时均无记录；**A 记录已于 2026-10-09 生效**）
+
+| 探测位置 | 命令 | 结果 |
+| --- | --- | --- |
+| 服务器（本地 resolver） | `getent hosts nd.thulaw.top` | 无输出 |
+| 服务器 → 8.8.8.8 / 223.5.5.5 / 119.29.29.29 / 127.0.0.53 | `dig +short @<ns> nd.thulaw.top A` | 全部为空 |
+| 本机 macOS | `host nd.thulaw.top` | `Host nd.thulaw.top not found: 3(NXDOMAIN)` |
+| 对照（同命令、同机器） | `thulaw.top` / `blog.thulaw.top` | 均 → `<服务器公网 IP>`（说明解析链路正常，缺的只是这条记录） |
+
+域 `thulaw.top` 的 NS 是 `dns15.hichina.com` / `dns16.hichina.com`（阿里云/万网 DNS 控制台）。**要在该控制台加一条 `nd` 的 A 记录指向 `<服务器公网 IP>`**；生效判据就是上表第一行命令出现结果。**不要**在记录存在前跑 certbot —— HTTP-01 挑战域名不可解析必然失败，且可能留下需要清理的临时状态。
+
+### 18.3 记录生效后的四步（**当前被 ICP 备案拦截，暂不可执行 —— 先读 §18.8**）
+
+```bash
+# ① 签发证书（--nginx 会自动在 vhost 内补 443 段并加 80→443 跳转）
+certbot --nginx -d nd.thulaw.top
+
+# ② 换公网基址（旧值为 http://127.0.0.1:8791，先留备份）
+cd /opt/notice-digest && cp -a .env /root/nd-env-backup-$(date +%Y%m%dT%H%M%S).bak
+sed -i 's|^ND_FEEDBACK_BASE=.*|ND_FEEDBACK_BASE=https://nd.thulaw.top|' .env
+
+# ③ 只重启反馈服务（这是唯一可安全重启的 unit）
+systemctl restart notice-feedback.service && systemctl is-active notice-feedback.service
+
+# ④ 从公网验证（必须从外部，见 §18.5 的启动自检误报）
+curl -sS -o /dev/null -w '%{http_code}\n' https://nd.thulaw.top/nd/health   # 期望 200
+curl -sS -w ' [%{http_code}]\n' https://nd.thulaw.top/nd/f                  # 期望 400 bad kind
+```
+
+**红线**：绝不重启 `notice-digest.service`（oneshot，重启即真实发信），绝不运行任何 `send` 子命令。改完 `.env` 只重启 `notice-feedback.service`。
+
+### 18.4 `/nd/f`、`/nd/c`、`/nd/health` 的逐类返回码（2026-10-09 实测；经 nginx 与直连 8791 两条路径结果一致）
+
+对应实现 `notice_digest/feedback.py` 的 `do_GET`，校验顺序为 **path → 参数 → 签名 → 过期 → 预取 → 写入**。
+
+| 请求 | 实测返回 | 说明 |
+| --- | --- | --- |
+| `GET /nd/f`（无参数） | **400 `bad kind`** | 参数校验先于签名校验 |
+| `GET /nd/f?id=x`（`k` 缺失） | **400 `bad kind`** | 同上 |
+| `GET /nd/f?id=x&k=zz&t=<32hex>`（`k` 非法） | **400 `bad kind`** | 合法 `k` 仅 `up`/`down`（`click` 只在 `/nd/c` 与内部学习路径使用） |
+| `GET /nd/f?id=x&k=up`（无 `t`） | **403 `bad signature`** | 签名缺失 |
+| `GET /nd/f?id=x&k=up&t=<错误签名>`（含旧密钥签的） | **403 `bad signature`** | 签名错误 |
+| `GET /nd/f?…&exp=<过去时刻>&t=<正确签名>` | **403 `expired`** | 本轮未单独发请求；按实现与既有口径记录 |
+| `GET /nd/f?id=<真实条目>&k=up&t=<正确签名>`，UA 命中预取名单（如含 `bot`） | **202** + 头 `X-ND-Skipped: prefetch` | **不写库、不计分**；stderr 记一行中文日志（见 §18.5） |
+| 同上，但 **无 UA** | **202** + `X-ND-Skipped: prefetch` | 「无 UA 即预取」是显式规则 |
+| 同上，但 UA 是真人/通用客户端（curl 默认、`python-urllib` 等） | **200** | 这一步**会真正落一条 feedback 行**；本轮刻意未执行，避免往生产库塞试探数据 |
+| `GET /nd/c?id=x`（无 `t`） | **403 `bad signature`** | |
+| `GET /nd/c?id=<不存在的 id>&t=<正确签名>` | **404 `unknown item`** | 在**任何写入之前**返回，故是无需写库的阳性对照 |
+| `GET /nd/health` 或 `/healthz`（无需签名） | **200** `ok` | |
+| `GET /nd/<其它路径>` | **404 `not found`** | |
+| `GET /`（`Host: nd.thulaw.top`） | **404**（nginx 自身页面） | `location / { return 404; }` |
+
+**零写库证明**：上表全部请求跑完后 `select count(*) from feedback` 仍为 **0**（含签名正确但被判为预取的两条 202）。即**所有未签名、签名错误、预取的请求都不产生任何写入** —— 这正是第 14 节那个判据：实现返回码与旧契约文字不符时，先看被保护的性质是否成立，成立就是措辞缺陷、不是代码缺陷。
+
+### 18.5 两个会误导排查的已知现象
+
+1. **启动自检的「不可达」警告是竞态误报**：`notice-feedback.service` 每次启动都会自检 `ND_FEEDBACK_BASE` 并打印 JSON（`public_base` / `reachable`）。2026-10-09 重启后它报 `http://127.0.0.1:8791/nd/health -> URLError: [Errno 111] Connection refused`，并打一行「警告：配置的公网反馈地址不可达」—— 但**同一 URL 在启动完成后 curl 是 200**：自检发生在监听器就绪之前。**换成 `https://nd.thulaw.top` 后每次重启都会重现这条警告，不要据此判定开通失败**；公网是否可达只能由**外部** `curl https://…` 判定。
+2. **预取日志是中文，不含 ASCII `prefetch`**：stderr 文案为 `[feedback] /nd/f 判定为预取，已忽略（未计入偏好）：item=… kind=… ua=…`。用 `journalctl -u notice-feedback.service | grep prefetch` 会**搜不到**（本轮就因此误判过一次「日志没写出来」），要搜 `预取`；ASCII 的 `prefetch` 只出现在响应头 `X-ND-Skipped` 里。日志随写随出，无缓冲延迟（实测请求时刻 10:37:44 与日志行时间戳一致）。
+
+### 18.6 今天那封已投递邮件里的反馈链接：全部无效（符合预期）
+
+- 今天 09:36:51 的 `notice-digest.service` 运行投递时，`ND_FEEDBACK_BASE` 是 `http://127.0.0.1:8791`（**回环但非空**），`ND_HMAC_SECRET` 也已设置 ⇒ `_feedback_links` 的两道条件都满足，**邮件里照常渲染了 👍/👎 与标题点击链接，href 全部指向 `http://127.0.0.1:8791/nd/...`**；用户点开的其实是自己电脑的回环地址，必然打不开 —— 这正是用户反馈的「按钮点击无效」。（**本文档早先写的「走安全降级、邮件里没有按钮」是误读**：判据只有「`feedback_base` 是否为空」+「`hmac_secret` 是否为空」，无任何回环特判；见第 12 节第 5 项与第 15 节。）
+- 另外当天 09:56 轮换了 `ND_HMAC_SECRET`（任务 t30），因此任何**此前**签发过的 `/nd/f`、`/nd/c` 链接签名均已失效（点击得 403）。两者叠加的净效果：**今天邮件里的反馈按钮不产生任何反馈写入**，无用户可见影响。
+- 今天那封邮件**不代表**反馈回路已可用：只有 §18.3 的 ②③ 做完，**下一封**邮件才会第一次带可用的反馈链接。而 §18.3 目前被**备案**卡住（§18.8），所以下一封邮件仍会带上**同样不可达**的按钮。
+
+### 18.7 上一轮完成 / 未做（当时等 DNS）与留证
+
+| 项 | 状态 | 证据 |
+| --- | --- | --- |
+| vhost / 限流区复核 | 已完成 | `nginx -t` 通过；配置见 §18.1 |
+| `notice-feedback.service` 重启 + 健康检查 | 已完成 | 重启用 10:37:58（InvocationID `4f17c22c2f1c4bdbbbdd4a0fc7d9bea4`）；`127.0.0.1:8791/nd/health` = 200；经 nginx（`Host: nd.thulaw.top`）= 200 |
+| 逐类返回码实测 | 已完成 | §18.4 表；跑完后 `feedback` 行数仍为 0 |
+| certbot 可用性 | 已确认待用 | `certbot --version` = 2.9.0；`certbot certificates` = No certificates found（全新，无历史证书需处理） |
+| **A 记录 / 证书 / `ND_FEEDBACK_BASE` 切换 / 公网验证** | **未完成（DNS 已解，改由 ICP 备案卡住，见 §18.8）** | §18.2 两轮探测当时均为空（**A 记录已于 2026-10-09 生效**，随即撞上未备案拦截）；`ND_FEEDBACK_BASE` 旧值仍为 `http://127.0.0.1:8791`（**刻意不提前切换**：https 侧链接当前必然打不开，改成 https 会让下一封邮件渲染出同样不可用的按钮） |
+| 全程零真实发信 | 已完成 | `data/send-receipts/` 文件数 7 → 7（增量为 0）；`notice-digest.service` 始终 `inactive/dead`，`InvocationID` 仍为 `fada3152d0764aca9c52f027f57fa61f`、`ExecMainStartTimestamp` 仍为 09:36:51，无新运行 |
+
+### 18.8 第二道硬前置：域名未 ICP 备案（阿里云按 Host/SNI 拦截）—— 2026-10-09 实测
+
+**结论：DNS 解决后暴露的是备案问题，与 nginx / certbot / 本机配置全都无关。** 决定性判据是「同一个 nginx、同一个 IP，**换 Host / SNI 就换结果**」：
+
+| 探测（**均从公网发起**，非服务器本机） | 命令 | 实测结果 |
+| --- | --- | --- |
+| 域名 + 80 | `curl --resolve nd.thulaw.top:80:<服务器公网 IP> http://nd.thulaw.top/nd/health` | **403**，`Server: Beaver`，正文标题 `Non-compliance ICP Filing`（请求**没到** nginx） |
+| 同机其它子域 + 80 | 同上，Host 换 `blog.thulaw.top` / `thulaw.top` / `comments.thulaw.top` | **同为 403** ⇒ 是整个域的备案状态，不是 `nd` 这条记录的问题 |
+| ACME 挑战路径 + 80 | `GET http://nd.thulaw.top/.well-known/acme-challenge/<token>` | **403** 同一个拦截页 ⇒ **HTTP-01 不可能通过** |
+| 域名 + 443（带 SNI） | `curl --resolve nd.thulaw.top:443:<服务器公网 IP> https://nd.thulaw.top/nd/health` | **000 / `Recv failure: Connection reset by peer`**（TCP 连上、ClientHello 发出后被重置），3 次取样稳定 |
+| SNI 换 `blog.thulaw.top` / `thulaw.top` | 同上 | **同样被重置**（而 `blog` 的自签 443 vhost 在服务器本机 `curl -k` 是 200 ⇒ 配置无问题，问题在链路上） |
+| **不带 SNI**（裸 IP） | `curl -k https://<服务器公网 IP>/` | **200**（命中 nginx 默认 443 站点）⇒ 拦截是按 **SNI / Host** 做的 |
+| 裸 IP + 80 / 裸 IP + 8080 | `curl http://<服务器公网 IP>/nd/health`；`curl http://<服务器公网 IP>:8080/` | **均 200** ⇒ 未备案拦截**只针对域名**，不针对 IP |
+| 服务器本机（对照组） | `curl -H 'Host: nd.thulaw.top' http://127.0.0.1/nd/health` | **200** ⇒ vhost 与反代本身完全正常 |
+| Let's Encrypt staging（**境外**） | `certbot certonly --nginx -d nd.thulaw.top --dry-run …` | **同样 403**（原文见 §18.3）⇒ 拦截与客户端所在地无关 |
+
+**推论（三条，缺一不可）**：
+1. **只要备案状态不变，`https://nd.thulaw.top` 对任何人都打不开** —— 不管有没有证书；因为 TLS 握手的 ClientHello（带该 SNI）在阿里云边缘就被重置了。
+2. **`certbot --nginx` 也永远签不出证书**：certbot 2.9.0 的 `nginx`/`standalone`/`webroot` 三个认证器都只走 HTTP-01，而 80 端口被备案拦截页接管；`tls-alpn-01` 只出现在 `manual` 插件里（DNS/HTTP 手工模式），不能用 `--nginx` 走。**不要反复重跑 certbot**（每次都会注册/使用账户并消耗 Let's Encrypt 的失败限额）。
+3. 因此 `.env` 里 `ND_FEEDBACK_BASE` **维持回环值不动**是当前唯一正确选择：改成 `https://nd.thulaw.top` 只会让下一封邮件渲染出**必然打不开**的按钮，比现状更糟。
+
+### 18.9 三条可行路径（均需用户拍板）
+
+| 路径 | 做法 | 代价 / 风险 |
+| --- | --- | --- |
+| **A 完成 ICP 备案（推荐）** | 在阿里云备案控制台为 `thulaw.top` 提交备案；通过后 80/443 自动解封 | 周期以周计、需用户实名与域名材料；**唯一能让 §18.3 四步原样跑通的路径** |
+| B 换已备案域名 / 境外主机 | 把 `/nd/` 反代放到某个已备案域名的站点下，或放到境外主机 | 需用户决策；多一份运维面（且需重新配 DNS 与证书） |
+| C IP 直连（临时可用，不推荐） | `ND_FEEDBACK_BASE=http://<服务器公网 IP>/...`（裸 IP 不被拦截，实测 200） | **明文 HTTP**，反馈令牌在链路上可见；Host 会落到默认站点，需另加一条按 IP 匹配的 `location /nd/`。属基础设施变更，需用户显式同意 |
+
+### 18.10 本 attempt（t32 attempt 2）做了什么 / 没做什么
+
+| 项 | 状态 | 证据 |
+| --- | --- | --- |
+| DNS 生效复核 | 已完成 | 服务器 `getent hosts` / `@114.114.114.114` / `@1.1.1.1` / 权威 `@dns15.hichina.com` 四处一致 → `<服务器公网 IP>` |
+| HTTP-01 可行性裁决 | 已完成（结论：不可行） | staging dry-run 原文 + §18.8 证据表（含「无 SNI 得 200」这个决定性对照） |
+| 备案拦截取证 | 已完成 | §18.8 全表（9 行探测，公网发起） |
+| `ND_FEEDBACK_BASE` 切 https | **未做（有意不做）** | 旧值 `http://127.0.0.1:8791` 原样保留；`.env` sha256 `404e11f8e218ee2e0c4d3a21bae18ad9b7d77b7692b00cf0b3c7c7f301b71bc4` 前后一致（未做备份也不需要备份，因为没改） |
+| `notice-feedback.service` | 上一轮已重启（本轮无需再动） | `127.0.0.1:8791/nd/health` = 200；`notice-digest.service` 全程未被触碰 |
+| 公网 `https://…/nd/health` = 200 | **未达成** | 443 被 SNI 重置（见 §18.8） |
+| 零真实发信 | 已完成 | `data/send-receipts/` 7 → 7（本任务全程 0 增量）；`notice-digest.service` 仍 `inactive/dead`，`InvocationID` 仍为 `fada3152d0764aca9c52f027f57fa61f`、`ExecMainStartTimestamp` 仍为 09:36:51 |
+| staging 演练的残留物 | **已披露** | 新增 `/etc/letsencrypt/accounts/acme-staging-v02.api.letsencrypt.org/`（staging 账户，惰性，未用于任何签发）、`options-ssl-nginx.conf`、`ssl-dhparams.pem` 与两个 `.updated-*` 摘要文件；**未产生任何生产账户或证书**（`/etc/letsencrypt/live` 不存在）；nginx vhost md5 前后一致 `3ebf4351a100c50d86c9aa67e366d7a0`；`nginx -t` 通过 |
+
+**下一轮从哪继续**：备案通过（或用户选定 B/C）后直接回到 §18.3 —— 注意首次签发需显式给邮箱或加 `--register-unsafely-without-email`（当前 `/etc/letsencrypt` 里**没有任何生产账户**，「复用现有 certbot 账户邮箱」无对应物）。
+
+## 19. 邮件分节改为网站原生分类并每类保底展示（t31）
+
+**结论先行**：邮件顶级分节不再用自创的 5 个桶（今日可去 / 讲座 / 实习 / 文体 / 其他），而是**逐字采用 pkuknow 站点原生分类**（`items.category`）；当日**有内容的分类才渲染**（不渲染空节），组内按个性化分降序，单组最多 20 条；紧迫度（今天 / 明天 / 截止）**降级为条目标签**，不再是分节维度。
+
+### 19.1 顶级分节 = 站点原生分类（13 类）
+
+`notice_digest/render.py` 的 `CATEGORY_ORDER` 是**唯一权威顺序**（按站点体量降序）：
+
+校园动态 → 实习就业 → 学术科研 → 社团公益 → 讲座活动 → 文体活动 → 学习成长 → 生活资讯 → 院系资讯 → 交流访学 → 校园服务 → 学业教务 → 奖助评优
+
+- **有内容才渲染**：`group_by_category()` 先分桶，只渲染非空桶；当日没有讲座就不出现「讲座活动」标题。
+- **category 缺失 / 空串 / 未知值**统一落 `UNCATEGORIZED = "未分类"`，该节固定排在 13 类之后（同样只在有内容时出现）。
+- **要加第 14 类**：在 `CATEGORY_ORDER` 里加一项即可（列表顺序即渲染顺序）—— 分节标题、分桶、排序全部由这一个常量派生，**没有第二处清单**。不要再去改 `Config.sections`（见 19.3）。
+
+### 19.2 组内排序、单组上限与超限提示
+
+- 组内按个性化分降序：`score` 空值按 0 处理。
+- 单组上限 `GROUP_LIMIT = 20`；超出时在该组列表**末尾**补一行 `本组还有 N 条未列出`（模板 `GROUP_OVERFLOW_TMPL`，N = 被隐藏条数）。截断是**每组独立**的，不是全局投影。
+
+### 19.3 全局「其他新通知」折叠桶已删除；`top_n` 仍生效但作用点在上游
+
+- 旧的全局折叠桶（把塞不进 5 个桶的条目合并成一节）**已删除**：邮件里不再有「其他新通知」这类节。
+- `Config.sections` 现在是**过时字段**：渲染器不再读它（分节只认 `CATEGORY_ORDER`），保留只为兼容既有配置文件与 `tests/test_score.py` 的旧断言。**改分节不要改它。**
+- `Config.top_n` 仍然有效，但作用点已上移到 `cli.py` 的 `_build_report()`（`scored[:top_n]`）：即「先按总分截断，再分节渲染」。因此 `top_n` 变小会让某些分类**整体消失**——这是预期语义，不是缺陷。
+
+### 19.4 紧迫度改为条目标签
+
+`_urgency_tags(p, now)` 生成，拼在条目 meta 行前部：
+
+| 条件 | 标签 |
+| --- | --- |
+| `start` 距当天 0 天 | 【今天】 |
+| `start` 距当天 1 天 | 【明天】 |
+| 无 `start` 但 `bucket == "today"` | 【今天】 |
+| 有 `deadline` | 【截止 MM-DD】 |
+
+- 「今天 / 明天能去」「截止提醒」**不再是顶级分节**（旧分节名已从代码移除）。
+- `时间待定（原文：…）` 的语义与措辞**未变**：仍是无解析结果时的兜底展示。
+
+### 19.5 未受影响的部分
+
+- 邮件 HTML 结构（`nd-section` / `nd-item` / `data-nd-item="1"`）、主题行格式、meta 行与页脚文本、零新增日的 `("", "", "")` 哨兵、无新闻日 / 详情全 429 的优雅降级、结构性故障 exit 3 + 失败邮件 —— **均未改动**。
+- **ICS 输出与分节无关**：日历事件只取决于条目的显式 `start`，分节方式不影响 ICS 字节。
+
+### 19.6 验证方式
+
+- `tests/test_render.py` 覆盖：原生分类固定顺序、组内按分类归属、缺席分类不渲染空节、未知/空/缺失分类落「未分类」、组内按个性化分降序、超限提示出现在第 20 条之后且位于 `</section>` 之前、`top_n` 不改变分节逻辑、紧迫度只作条目标签、无全局折叠桶。
+- **反证（在项目目录外的副本里注入缺陷，被保护断言必须变红）**：`_group_note` 恒返回空串 → 超限提示断言红；`_urgency_tags` 恒返回空串 → 两条紧迫度断言红；`category_of` 恒返回「未分类」→ 原生分类分节断言红；`group_by_category` 的 `reverse=True` 改 `False` → 组内排序断言红。四项均实测变红、对照组保持绿，断言非空转。
+
+> 脱敏说明：本文档随公开仓库 thu-lawyer/notice-digest 发布，服务器公网 IP 一律以 `<服务器公网 IP>` 占位（域名与端口保持原样，便于对照拓扑）；复现命令时把你实际的服务器 IP 代入即可。

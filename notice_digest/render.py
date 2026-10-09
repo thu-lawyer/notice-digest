@@ -49,11 +49,34 @@ SEP = "\uff5c"  # ｜ 全角竖线：主题分隔符，照 captain 给定样例
 DOT = "\uff0c"  # ，条目之间
 CIRCLED = ("\u2460", "\u2461", "\u2462", "\u2463", "\u2464")  # ①..⑤
 
-# 分节顺序固定：① 今天/明天能去 → ② 截止提醒 → ③ 本周讲座与学术 → ④ 实习就业 → ⑤ 其他新通知
-SECTION_TITLES = ("今天/明天能去", "截止提醒", "本周讲座与学术", "实习就业", "其他新通知")
+# 顶级分节 = pkuknow 网站原生分类（items.category）。13 类按站点内体量从大到小固定排序；
+# 不再自创「今天/明天能去 / 截止提醒 / 本周讲座与学术 / 实习就业 / 其他新通知」五桶。
+# 紧迫度（今天 / 明天 / 截止）降级为条目标签，见 _urgency_tags。
+CATEGORY_ORDER = (
+    "校园动态",
+    "实习就业",
+    "学术科研",
+    "社团公益",
+    "讲座活动",
+    "文体活动",
+    "学习成长",
+    "生活资讯",
+    "院系资讯",
+    "交流访学",
+    "校园服务",
+    "学业教务",
+    "奖助评优",
+)
+# 取值不在 CATEGORY_ORDER 内（含空值 / 纯空白 / 历史旧取值）的条目统一落这一节，永远排在最后。
+# 于是「顶级分节标题集合」恒为 CATEGORY_ORDER ∪ {UNCATEGORIZED}：站点将来新增第 14 类时，
+# 它先落「未分类」，而不是凭空长出一个没人认识的分节；要正式启用，把它加进 CATEGORY_ORDER 即可。
+UNCATEGORIZED = "未分类"
+# 单组最多展示条数；超出部分本轮不在正文展开，只在组尾提示条数（不再是全局折叠桶）。
+GROUP_LIMIT = 20
 
 SUMMARY_LIMIT = 120
-OVERFLOW_NOTE = "以下条目超出优先展示条数（top_n），仍然保留、不丢弃。"
+# 组内超限提示（写在组尾）：超出的条目本轮不在正文展开；条目本身仍在库里、下一轮照常参与排序。
+GROUP_OVERFLOW_TMPL = "本组还有 {n} 条未列出"
 DEV_MODE_NOTE = (
     "本地开发模式：未配置 feedback_base，标题直链原始通知、未渲染反馈按钮，"
     "本条邮件的点击与反馈不会被记录。"
@@ -61,13 +84,6 @@ DEV_MODE_NOTE = (
 DEV_MODE_NO_SECRET_NOTE = (
     "本地开发模式：feedback_base 已配置但缺少 hmac_secret，无法签名反馈链接，"
     "已退化为标题直链、不渲染反馈按钮。"
-)
-
-LECTURE_HINTS = (
-    "讲座", "学术", "论坛", "研讨", "报告会", "沙龙", "读书会", "seminar", "lecture", "symposium",
-)
-INTERN_HINTS = (
-    "实习", "就业", "招聘", "校招", "求职", "职业发展", "宣讲会", "job", "intern", "career",
 )
 
 _WEEKDAY_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
@@ -100,7 +116,9 @@ _DEFAULT_CONFIG = {
     "keywords_boost": {},
     "keywords_mute": [],
     "source_boost": {},
-    "sections": list(SECTION_TITLES),
+    # 兼容 config.py 的 Config.sections 字段（tests/test_score.py 断言它非空）；
+    # 渲染层已不再用它决定分节，分节顺序由 CATEGORY_ORDER 决定。
+    "sections": list(CATEGORY_ORDER),
 }
 
 
@@ -230,40 +248,50 @@ def _dev_note(cfg: Config) -> str:
     return DEV_MODE_NOTE
 
 
-def section_of(item: dict, p, now: datetime) -> int:
-    """按固定顺序给条目分节；每条只进一个节，不重复挂载。"""
-    today = now.date()
-    tomorrow = today + timedelta(days=1)
-    start = _as_shanghai(getattr(p, "start", None))
-    deadline = _as_shanghai(getattr(p, "deadline", None))
-    bucket = (_squeeze(getattr(p, "bucket", "")) or "").lower()
-    haystack = " ".join(
-        _squeeze(item.get(key))
-        for key in ("title", "category", "intent_group", "organizer", "ai_event_time", "ai_intent")
-    )
-    if start is not None and start.date() in (today, tomorrow):
-        return 1
-    if deadline is not None and deadline.date() in (today, tomorrow):
-        return 2
-    if any(hint in haystack for hint in LECTURE_HINTS):
-        return 3
-    if bucket in ("this_week", "next_week") and start is not None:
-        return 3
-    if any(hint in haystack for hint in INTERN_HINTS):
-        return 4
-    return 5
+def category_of(item: dict) -> str:
+    """条目的顶级分节标题 = pkuknow 原生分类；取值不在 13 类内（含空值）一律「未分类」。"""
+    name = _squeeze((item or {}).get("category"))
+    return name if name in CATEGORY_ORDER else UNCATEGORIZED
 
 
-def _section_titles(cfg: Config):
-    given = getattr(cfg, "sections", None)
-    if isinstance(given, (list, tuple)):
-        names = [_squeeze(x) for x in given]
-        if len(names) >= 5 and all(names[:5]):
-            return tuple(names[:5])
-    return SECTION_TITLES
+def group_by_category(ordered, parsed):
+    """按原生分类分组，返回 [(标题, [(scored, parsed), ...]), ...]。
+
+    - 顺序：CATEGORY_ORDER 的顺序，其后是「未分类」；无内容的分类不返回（不渲染空节）。
+    - 组内：按个性化分 scored.score 降序，同一天同一分类里越合口味的越靠前。
+    """
+    buckets: dict = {}
+    for scored in ordered:
+        item = getattr(scored, "item", None) or {}
+        buckets.setdefault(category_of(item), []).append((scored, _parsed_of(parsed, scored)))
+    titles = [name for name in CATEGORY_ORDER if name in buckets]
+    if UNCATEGORIZED in buckets:
+        titles.append(UNCATEGORIZED)
+    return [
+        (
+            name,
+            sorted(
+                buckets[name],
+                key=lambda pair: float(getattr(pair[0], "score", 0.0) or 0.0),
+                reverse=True,
+            ),
+        )
+        for name in titles
+    ]
 
 
-# --------------------------------------------------------------------------- 主题
+def _ordinal(index: int) -> str:
+    """①..⑳；超出 20（现实最多 14 个分类）退化为「21.」形式，保证序号唯一可读。"""
+    if 1 <= index <= len(CIRCLED):
+        return CIRCLED[index - 1]
+    if 1 <= index <= 20:
+        return chr(0x2460 + index - 1)
+    return f"{index}."
+
+
+def _group_note(hidden: int) -> str:
+    """组尾提示：本组还有多少条未列出（0 条返回空串）。"""
+    return GROUP_OVERFLOW_TMPL.format(n=hidden) if hidden > 0 else ""
 
 
 def build_subject(ordered, parsed, now: datetime) -> str:
@@ -296,6 +324,29 @@ def build_subject(ordered, parsed, now: datetime) -> str:
 # --------------------------------------------------------------------------- 条目
 
 
+def _urgency_tags(p, now: datetime) -> str:
+    """紧迫度标签（条目内标签，不再是顶级分节）：【今天】【明天】【截止 MM-DD】。
+
+    原文没给出任何可解析时间时不编造标签（那种条目的时间文本是「时间待定（原文：…）」）。
+    """
+    today = now.date()
+    tags = []
+    start = _as_shanghai(getattr(p, "start", None))
+    if start is not None:
+        delta = (start.date() - today).days
+        if delta == 0:
+            tags.append("【今天】")
+        elif delta == 1:
+            tags.append("【明天】")
+    elif (_squeeze(getattr(p, "bucket", "")) or "").lower() == "today":
+        # 只有相对文本（「今天」）能解析出 bucket 时，start 为空但语义确定是今天
+        tags.append("【今天】")
+    deadline = _as_shanghai(getattr(p, "deadline", None))
+    if deadline is not None:
+        tags.append(f"【截止 {deadline.month:02d}-{deadline.day:02d}】")
+    return "".join(tags)
+
+
 def _item_parts(scored, p, cfg: Config, now: datetime) -> dict:
     item = getattr(scored, "item", None) or {}
     item_id = _squeeze(item.get("id"))
@@ -312,10 +363,14 @@ def _item_parts(scored, p, cfg: Config, now: datetime) -> dict:
     elif not place and _as_shanghai(getattr(p, "start", None)) is not None:
         place = "地点未注明"
     meta = " · ".join(part for part in (source, time_text, place) if part)
+    tags = _urgency_tags(p, now)
+    if tags:  # 紧迫度作为条目标签前置，HTML 与纯文本共用同一串元信息
+        meta = f"{tags} {meta}"
     return {
         "item_id": item_id,
         "title": title,
         "meta": meta,
+        "tags": tags,
         "summary": _truncate(item.get("ai_summary")),
         "evidence": evidence,
         "place": place,
@@ -366,16 +421,16 @@ def _item_html(scored, p, cfg: Config, now: datetime) -> str:
 def _section_html(index: int, title: str, entries, cfg: Config, now: datetime, note: str = "") -> str:
     items = "".join(_item_html(scored, p, cfg, now) for scored, p in entries)
     note_html = (
-        f'<p style="margin:0 0 8px;color:#8a8f89;font-size:13px;">{_esc(note)}</p>' if note else ""
+        f'<p style="margin:8px 0 0;color:#8a8f89;font-size:13px;">{_esc(note)}</p>' if note else ""
     )
     return (
         '<section class="nd-section" style="margin:0 0 18px;">'
         '<h2 style="font-size:16px;margin:0 0 10px;padding-left:8px;border-left:3px solid #5e7868;">'
-        f"{_esc(CIRCLED[index - 1])} {_esc(title)}"
+        f"{_esc(_ordinal(index))} {_esc(title)}"
         f'<span style="color:#8a8f89;font-size:13px;font-weight:400;">（{len(entries)} 条）</span>'
         "</h2>"
-        f"{note_html}"
         f'<ul style="margin:0;padding:0;">{items}</ul>'
+        f"{note_html}"
         "</section>"
     )
 
@@ -401,11 +456,10 @@ def _section_text(index: int, title: str, entries, cfg: Config, now: datetime, n
     body = []
     for seq, (scored, p) in enumerate(entries, start=1):
         body.append(_item_text(scored, p, cfg, now, seq))
-    head = f"{CIRCLED[index - 1]} {title}（{len(entries)} 条）"
-    chunks = [head]
-    if note:
+    head = f"{_ordinal(index)} {title}（{len(entries)} 条）"
+    chunks = [head, "\n".join(body)]
+    if note:  # 组尾提示：同 HTML 版，写在正文之后
         chunks.append(note)
-    chunks.append("\n".join(body))
     return "\n".join(chunks)
 
 
@@ -417,22 +471,22 @@ def _load_template(name: str) -> Template:
     return Template(path.read_text(encoding="utf-8"))
 
 
-def _build_buckets(ordered, parsed, cfg: Config, now: datetime):
-    top_n = int(getattr(cfg, "top_n", 0) or 0)
-    if top_n > 0:
-        primary, overflow = ordered[:top_n], ordered[top_n:]
-    else:
-        primary, overflow = ordered, []
-    buckets = {1: [], 2: [], 3: [], 4: [], 5: []}
-    for scored in primary:
-        p = _parsed_of(parsed, scored)
-        buckets[section_of(getattr(scored, "item", None) or {}, p, now)].append((scored, p))
-    for scored in overflow:
-        buckets[5].append((scored, _parsed_of(parsed, scored)))
-    return buckets, bool(overflow)
+# --------------------------------------------------------------------------- 分节渲染
 
 
-# --------------------------------------------------------------------------- 主渲染
+def _render_sections(ordered, parsed, cfg: Config, now: datetime, renderer) -> list:
+    """按原生分类逐节渲染，返回已渲染的字符串列表。
+
+    - 每个当日有内容的分类保底展示（空分类不产生分节）；
+    - 组内已按个性化分降序（见 group_by_category）；
+    - 单组最多 GROUP_LIMIT 条，超出部分只在组尾提示条数。
+    """
+    chunks = []
+    for index, (title, entries) in enumerate(group_by_category(ordered, parsed), start=1):
+        shown = entries[:GROUP_LIMIT] if GROUP_LIMIT > 0 else entries
+        note = _group_note(len(entries) - len(shown))
+        chunks.append(renderer(index, title, shown, cfg, now, note))
+    return chunks
 
 
 def render_email(scored, parsed, cfg: Config, now: datetime) -> tuple[str, str, str]:
@@ -451,17 +505,8 @@ def render_email(scored, parsed, cfg: Config, now: datetime) -> tuple[str, str, 
 
     parsed = parsed or {}
     subject = build_subject(ordered, parsed, now)
-    buckets, has_overflow = _build_buckets(ordered, parsed, cfg, now)
-    titles = _section_titles(cfg)
-
-    html_sections, text_sections = [], []
-    for index in (1, 2, 3, 4, 5):
-        entries = buckets[index]
-        if not entries:
-            continue
-        note = OVERFLOW_NOTE if (index == 5 and has_overflow) else ""
-        html_sections.append(_section_html(index, titles[index - 1], entries, cfg, now, note))
-        text_sections.append(_section_text(index, titles[index - 1], entries, cfg, now, note))
+    html_sections = _render_sections(ordered, parsed, cfg, now, _section_html)
+    text_sections = _render_sections(ordered, parsed, cfg, now, _section_text)
 
     dev_note = _dev_note(cfg)
     meta_line = build_meta_line(ordered, parsed, now)
@@ -496,15 +541,7 @@ def render_plain_text(scored, parsed, cfg: Config, now: datetime) -> str:
         return ""
     parsed = parsed or {}
     subject = build_subject(ordered, parsed, now)
-    buckets, has_overflow = _build_buckets(ordered, parsed, cfg, now)
-    titles = _section_titles(cfg)
-    sections = []
-    for index in (1, 2, 3, 4, 5):
-        entries = buckets[index]
-        if not entries:
-            continue
-        note = OVERFLOW_NOTE if (index == 5 and has_overflow) else ""
-        sections.append(_section_text(index, titles[index - 1], entries, cfg, now, note))
+    sections = _render_sections(ordered, parsed, cfg, now, _section_text)
     return _load_template("email.txt.j2").substitute(
         subject=subject,
         meta_line=build_meta_line(ordered, parsed, now),

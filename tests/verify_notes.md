@@ -196,7 +196,9 @@ cd "../zcode/notice-digest" && /opt/anaconda3/bin/python3 -m unittest tests.test
 
 **契约 verify #5，逐字执行**（〔历史命令：该 verify 条目已在后续轮次从契约移除，见 §17.9〕）：
 ```bash
-cd "../zcode/notice-digest" && git grep -nEi '(<服务器公网 IP>|@tsinghua\.org\.cn|<SMTP 账号>|<真实姓名>|授权码)' -- . ; echo "exit=$?  (0=命中需修, 1=干净)"
+# 脱敏改造（2026-10-09）：原命令内联了服务器公网 IP／发件邮箱域名／SMTP 账号名／姓名等真值，
+# 现改为引用本地私有清单（示例：环境变量 ND_DENY_RE），真值不落库。
+cd "../zcode/notice-digest" && git grep -nEi "$ND_DENY_RE" -- . ; echo "exit=$?  (0=命中需修, 1=干净)"
 ```
 **实际输出**：
 ```
@@ -210,10 +212,14 @@ GITGREP_EXIT=128
 **替代扫描**（等价语义，非 git 仓库改用 `grep -rn`；`data/` 为运行产物、`__pycache__`
 为字节码，均排除）：
 ```bash
-grep -rnEi '(<服务器公网 IP>|@tsinghua\.org\.cn|<SMTP 账号>|<真实姓名>|授权码)' . \
+# 同上：模式串由本地私有清单提供（示例：ND_DENY_RE），文档内不保留真值。
+grep -rnEi "$ND_DENY_RE" . \
   --exclude-dir=data --exclude-dir=__pycache__ --exclude-dir=.git \
   --exclude-dir=.mypy_cache --exclude-dir=.pytest_cache ; echo "GREP_EXIT=$?"
 ```
+> 说明（2026-10-09 脱敏改造）：以上两次执行的输出为改造前「模式串内联真值」版本的实测结果；
+> 本次只把模式串来源改为本地私有清单，匹配语义不变。
+
 **实际输出**：无任何匹配行，`GREP_EXIT=1`（1 = 无命中 = 干净）。扫描覆盖 20 个文本文件。
 
 **补充扫描**（SMTP 凭据 / HMAC 密钥字面量，`grep -rnEi '(smtp_pass|SMTP_PASS|ND_SMTP_PASS|hmac_secret|ND_HMAC_SECRET)'`）：
@@ -689,7 +695,7 @@ round 1/早期曾提出「详情载荷的 `detail_status` / `body_status` 未被
 | `docs/RUNBOOK.md:28` | 部署说明中的字段名 |
 
 其余核查：**无** `.env`、**无** `.env.example`、**无** `.gitignore`、**无** `.git` 目录、
-**无** 明文服务器 IP / 邮箱 / 姓名 / 授权码（本文件内敏感字面量一律字符类打断）。
+**无** 明文服务器 IP / 邮箱 / 姓名 / 授权码（本文件不写敏感真值：一律用占位符或类别名；且本文件被扫描器 `SKIP_FILES` 豁免，故须另按独立 grep 口径复核，见 §8 与 §23）。
 `data/` 下为运行时产物（SQLite/日志/HTML），不当交付物、不入版本库。
 
 ### 15.11 本轮测试清单变动
@@ -1505,3 +1511,170 @@ C. markdown 值形态（三旧仪器均未命中，属绝对覆盖缺口，非�
 【RUNBOOK §12 建议条目】
 - 本仓存在**两套旧谓词复刻**（HEAD 名词子串、r2 PRE=t21 round-1）；任何「相对基线无回归」的结论必须写明用的是哪一套，否则结论不可复核。
 - 新谓词当前**弱于 r2 PRE**（净回归 8 类字面输入，见 A/B 组），在修复前不得宣称「严格更强」。
+
+## 22. round 7 = t29 · t27（429 分级/可观测性/优雅降级）与 t28（真实投递）独立复核（verifier · 2026-10-09）
+
+本轮为**独立复现 + 反向控制**，不复用 t27/t28 的任何结论：凡本节出现的数据均为本次现场测量，原始输出落
+`Vesper缓存/临时工作区/nd_review/t29/`（`probe_t29.py` / `probe_t29.json` / `burst_t29.py` / `burst_t29.log` / `suite_full.txt`）。
+
+### 22.1 ① 冻结证明（验收 1）—— 逐字节一致，判定通过
+
+SHA-256（macOS `shasum -a 256`），开工 2026-10-09T01:50:12Z 与收尾 2026-10-09T02:10:20Z 两次取样逐字节相同：
+
+| 文件 | 行数 | 开工 = 收尾 sha256 |
+| --- | --- | --- |
+| `notice_digest/fetch.py` | 338 | `22191614d6b9a679ee92640347818cd8eeac95dc611844a47c40d18db6751d56` |
+| `notice_digest/enrich.py` | 401 | `90480a87d6df1971a3227eb9622bdbf94f26293b18d79ea4f94171de1a7eba3f` |
+| `notice_digest/cli.py` | 901 | `79b67c4f39fdfb96e8742dee11e4a5981be970bcf0c30d3ec29eba9a165627be` |
+| `tests/test_integration.py` | 3300 | `11cf1528da0c0cabc955f98fc0b4aba6fd0bf1e5f1b72bcf72b75538037ae412` |
+| `tests/test_enrich_rate_limit.py` | 529 | `548b32247eb646de17e0908d7cbb7925a78bd6a04f0a27d98650beaa925674af` |
+
+`git rev-parse --short HEAD` = `2a2aa2f`（与 captain 刷新后的锚点 `HEAD = origin/main = 2a2aa2f` 一致）；
+两次取样 `git status --porcelain` 均为 **0 行**。⇒ 树在验证期间静止，本节的绿灯在同一棵静止树上给出。
+（唯一 delta 是本文件自身：本节为 inScope 内的 append，见 22.9。）
+
+### 22.2 ② 可观测性独立复现 + 反向控制（验收 2）—— 判定通过
+
+仪器 `probe_t29.py`：本地 `ThreadingHTTPServer`(127.0.0.1) + monkeypatch `fetch.BASE_URL`，走**真实 urllib → HTTPError → `RateLimited` 分类路径**，
+并全局替换 `time.sleep` 记录每一次睡眠；`enrich_one` 直接调用（非 mock enrich）。
+
+输入类别 ⇒ `error_samples` 互不相同（反向控制成立）：
+
+| 注入模式 | detail 请求次数 | sleeps | 计数 | `error_samples[0]`（逐字） |
+| --- | --- | --- | --- | --- |
+| `all429` | **1** | `[]` | fetched=0 failed=1 rate_limited=1 errors=0 | `t29-000｜RateLimited: HTTP 429 for http://127.0.0.1:54459/thu/api/notices/t29-000` |
+| `all404` | 4 | `[]` | not_found=4 rate_limited=0 | `t29-000｜FetchError: HTTP 404 for …` |
+| `all500` | 12 | `[1.5,3.0]×4` | failed=4 errors=4 | `t29-000｜FetchError: HTTP 500 for …` |
+| `allnonjson` | 12 | `[1.5,3.0]×4` | failed=4 errors=4 | `t29-000｜FetchError: Expecting value: line 1 column 1 (char 0)` |
+
+- 429 样本**非空且含「429」**（逐字见上），换 404 / 非 JSON 后样本随之改变 ⇒ 不是硬编码字符串。
+- 1.5+3.0 s 重试阶梯**只在非 429 的结构性失败上出现**（500/非 JSON 各 4 条 ×3 次尝试 = 12 请求、8 次睡眠），429 路径 1 请求 0 睡眠。
+- `stopped_reason='rate-limited'`、`stopped_at='t29-000'`、`remaining_pending=3`（4 条中只动 1 条，其余留在 pending）。
+
+**披露（依约必写）**：`all500`/`allnonjson` 两组以 `retries=1` 运行（若用生产默认 3 则每条 ~4.5 s×4）。这是**为控制夹具耗时**的选择，
+不构成断言放宽：该两组要证的是「结构性失败**仍**进入重试阶梯并被计为 errors」，`retries=1` 下仍观察到 3 次尝试/条与完整阶梯。
+
+### 22.3 ③ 429 分级两侧（验收 3）—— 判定通过
+
+CLI 级（真 `cli.cmd_enrich`，`mailer.send` 换成记录器，绝不真发信）：
+
+| 场景 | exit | 失败邮件 | stderr 关键行（逐字） |
+| --- | --- | --- | --- |
+| 全 429（`retries=3`） | **0** | **0** | `[enrich][warn] detail-rate-limited: 1 条详情被站点限流（HTTP 429）；本批首次命中即收批（stopped_at=t29-000，remaining=3），已补全的照常入库，未补全的原样留在 pending 留待下一轮；Retry-After=0.0` |
+| 全 500（`retries=1`） | **3** | **1** | `[enrich][error] detail-fetch-all-failed: 详情请求 0 条全部失败（非限流、非 404 的结构性失败 4 条）` + `FAILURE [enrich] …` |
+| 全非 JSON（`retries=1`） | **3** | **1** | 同上一行文本 |
+| 全 404（`retries=1`） | 0 | 0 | `[enrich][warn] detail-404: 4 条详情 404（列表挂着但详情已下架），已计数并留待重试，不影响其它条目` |
+
+- 429 侧：exit 0、**无** `detail-fetch-all-failed`、不触发失败邮件 ⇒ 与 t27 宣称一致。
+- 结构性侧：仍 exit 3 + 一封失败邮件 ⇒ **致命判据没有被整体删除**。两侧并存即「分级」本身成立。
+- 附带：404 单独归一类且不致命（t27 未宣称，本次顺带确认）。
+
+### 22.4 ④ 优雅降级（验收 4）—— 判定通过
+
+场景 C（12 条待补全，`min_interval=1.0` 生产节流，第 6 条起全 429）：
+
+- `detail_requests=6`；逐条耗时 `per_item_seconds=[0.002,0.003,0.004,0.004,0.003,0.003]`，`elapsed_seconds=5.019`。
+- 请求到达时刻偏移 `[0.001,1.005,2.010,3.014,4.017,5.018]`，相邻间隔 `[1.004,1.005,1.004,1.003,1.000]`。
+- `sleeps=[0.998,0.9965,0.9961,0.9957,0.9964]`（5 次，全部是节流睡眠，总 ≈4.983 s）。
+- **无 ~4.8 s/条的重试阶梯**（若 429 走老路径，6 条至少 18 次请求 + 15 次幂等阶梯睡眠）。
+- 计数 `fetched=5 failed=1 rate_limited=1 text_only=5 attempted=6 remaining_pending=6`；
+  入库核对 `{total:12, pending:7, complete:5}`，`sum_enrich_attempts=1` ⇒ **未补全的条目仍是 pending、总数不减少**（12 → 12）。
+
+### 22.5 ⑤ 真实投递核验（验收 5）—— 判定通过，但**「重跑 t28 命令」这一 leg 被替换并披露**
+
+服务器侧（**只读**，经部署私钥 SSH 登录 `<服务器公网 IP>`，打开 `/opt/notice-digest/data/notice.db`，用 venv 的 sqlite3 模块）：
+
+```
+send_attempts.count = 1
+{'date': '2026-10-09', 'fingerprint': 'bc2010eed2fdf4e0c4820c752c21bff4',
+ 'subject': '清华通知日报 10-09｜新增 4 条', 'n_items': 4, 'status': 'sent',
+ 'started_at': '2026-10-09T09:36:51.929349+08:00', 'sent_at': '2026-10-09T09:36:52.877601+08:00'}
+sends.count = 1
+{'date': '2026-10-09', 'subject': '清华通知日报 10-09｜新增 4 条', 'n_items': 4,
+ 'sent_at': '2026-10-09T09:36:52.877601+08:00'}
+items.count = 904
+```
+receipt 文件 `/opt/notice-digest/data/send-receipts/2026-10-09-bc2010eed2fdf4e0c4820c752c21bff4.json`
+（226 B，`sha256=efbf54a25acb4e38ca8cf7dcca093d06629c2646e859389b1410d102b7ad2e13`）内容与台账逐字相符：
+`{"date":"2026-10-09","fingerprint":"bc2010eed2fdf4e0c4820c752c21bff4","subject":"清华通知日报 10-09｜新增 4 条","n_items":4,"to_addr":"<SMTP 账号>@…","sent_at":"2026-10-09T09:36:52"}`。
+三处独立来源（`send_attempts` 行 / `sends` 行 / receipt JSON）在 fingerprint、subject、n_items 上一致 ⇒ 当日确有一封 n_items=4 的日报送达。
+
+**为什么没有「重跑 t28 命令逐字比对」**（诚实披露，不掩盖）：
+1. captain 本轮硬指令【4】「生产只读：禁止任何生产 `send`/真实投递」——「重跑 t28 命令」就是一次真实投递，两条要求互斥；
+2. 且它**已不可能自证幂等**：本仓内容指纹吃整封 HTML，页脚内嵌渲染时刻（t13 已实测 `+61s` 重跑两道闸同时失配 → disp=1），
+   故「重跑得出 disp=0」在这一版实现上不是可期待的结果；同日目录里已有 7 个 receipt（07:30/08:00/01:15 的失败通知 + 09:36 的成功），亦与「同日可重复写入」一致。
+3. 替代证据即上表三源一致 + 本节 22.3 的 exit/stderr 证据。**若 captain 坚持要该 leg，需要一次被授权的真实发送**，本节不代跑。
+
+**新增负面发现（措辞级，非代码缺陷）**：t28 声称的本地 receipt 路径 `zcode/notice-digest/data/send-receipts/2026-10-09-bc2010ee….json`
+**在磁盘上不存在**（`ls` → `No such file or directory`；`find … -name "*bc2010ee*"` 空）。`data/` 在 `.gitignore` 中
+（`git check-ignore -v data/send-receipts` → `.gitignore:7:data/`），故它不体现在 `git status` 上；本地 `data/` 无 `notice.db`，说明投递实际发生在服务器。
+⇒ 投递证据成立（在服务器侧），但 t28 的「本地 receipt」措辞在本机不可复现，建议改为服务器路径以免下一位复核者按错路径寻找。
+
+### 22.6 ⑥ 全量测试独立复跑（验收 6）—— 判定通过
+
+`/opt/anaconda3/bin/python3 -m unittest discover -s tests -v`（全量，含 live 端到端；原始输出 `suite_full.txt`，349 行）：
+
+- L260 `Ran 205 tests in 56.424s`；L262 `OK`；L349 `SUITE_EXIT=0`。
+- 205 ≥ 187（契约下限）；本地 `def test_` 分布复核：18+10+46+57+4+38+32 = 205。
+- `tests/` 下 `self.assert*` 总数 **883**（test_enrich_rate_limit 104 / test_fetch_session 46 / test_integration **328** / test_render 231 / test_repair_round2 15 / test_score 98 / test_timeparse 61），
+  其中 `test_integration.py` 仍是 **328 断言 / 3300 行 / `11cf1528…`** ⇒ 相对基线断言数未减少，且 `test_integration.py` 一字未动。
+
+### 22.7 ⑦ 限流曲线独立复核（验收 7）—— 判定通过（首发序号非常数，与 RUNBOOK 记载相容）
+
+授权口径（captain【3】）：**全新会话、生产同路径、`retries=1`、上限 70、命中即停**；本脚本另含 RUNBOOK §17.3 规定的恰好两次恢复探测。
+原始输出 `burst_t29.log`（逐字，节选）：
+
+```
+[B] #1  id=weixinzs_476859909:12258130 200 0.224s (自首请求 +0.224s)
+[B] #10 … 200 0.153s (+2.025s)
+[B] #20 … 200 0.193s (+4.111s)
+[B] #30 … 200 0.166s (+6.228s)
+[B] #36 id=weixinzs_467260306:12247221 **非 200** code=429 elapsed=0.144s 自首请求 +7.337s
+[B] 异常文本逐字：HTTP 429 for https://pkuknow.cn/thu/api/notices/weixinzs_467260306%3A12247221
+[B] retry_after（解析自 Retry-After 响应头）：1.0
+[B] 突发段结束：发起 36 次，成功 35 次；逐次耗时 min/avg/max = 0.136/0.204/0.326
+[R] +60s  单请求探测：code=200 elapsed=0.273s 绝对时刻=2026-10-09T10:05:15+0800
+[R] +300s 单请求探测：code=200 elapsed=0.291s 绝对时刻=2026-10-09T10:09:15+0800
+```
+
+对照 RUNBOOK §17：
+- L384「429 是短窗口突发触发（零节流 35 次即撞墙）」——本次首发 **#36**（t27 记 #35），差 1，且 L385 **明示「不要把首发序号当常数」**（取决于突发开始时的剩余额度），
+  故差异**不构成不符**；判定依据是结构（70 上限内必然撞墙、命中即停、`Retry-After` 可解析）。
+- L385「撞墙按 `Retry-After` 收批（实测 1.0 s；实现上限 30.0）」——实测 `retry_after=1.0`，与记载一致。
+- L386「再测纪律：一次突发 + 恰好两次恢复探测」——本脚本严格遵守，且两次探测**均为 200**（+60 s / +300 s 均恢复）⇒ 429 为瞬时限流而非封禁。
+- 【未复跑 leg】L384 的「生产 1 s 节流连续 550 次不撞」：不在 captain 授权范围内（上限 70），耗时长且属生产流量，RUNBOOK L386 亦明示无需再做。
+  该性质由本次 mock 对照侧（22.2 的 `all429` 与 22.4 的 C 场景）以「1 req/s 节流下第 6 条才命中；429 ⇒ 1 请求 0 睡眠」独立确认。
+
+### 22.8 ⑧ 交付判定（验收 8）
+
+八项验收全部成立（① 冻结一致 ② 可观测+反向控制 ③ 分级两侧 ④ 优雅降级 ⑤ 投递三源一致 ⑥ 205 测试全绿 ⑦ 曲线复现 ⑧ 见下），
+唯一需 captain 知悉的是 22.5 的 leg 替换与措辞级负面发现 —— 二者均不影响 t27/t28 的结论成立性。
+
+### 22.9 残余、披露与运维告警（明示非本次修复缺陷）
+
+1. **本文件自身**：`tests/verify_notes.md` 由 1507 行增至本节末尾（收尾本文件 sha256 已变），这是本任务 inScope 内的唯一写入；
+   其余 5 个冻结文件哈希不变。开工前副本留档 `Vesper缓存/临时工作区/nd_review/t29/verify_notes.pre_t29.md`。
+2. **生产 07:30 投递当前未成功**（与本次修复正交，但对团队目标是实质的）：今日 receipt 目录里有
+   `运行失败：fetch` + `运行失败：notice-digest.service`（07:30，n_items=0）与 `运行失败：enrich`（08:00，n_items=0）；
+   当日唯一成功日报是 09:36 的人工/修复后投递（n_items=4）。⇒ 建议 captain 单独开任务排查 07:30 那次 `fetch` 失败的原因。
+3. **失败通知不写台账**：`send_attempts`/`sends` 各只有 1 行，而 receipt 有 7 个 ⇒ `report_failure` 走 mailer 落 receipt 但不插 `send_attempts`。
+   这不违反任何已宣称性质，但会让「台账行数 = 投递次数」的推断出错，写进 RUNBOOK 可省后人事。
+4. 凭据扫描（本次范围内复核）：`notice_digest/**`、`deploy/**`、`profile.example.yaml` 无明文凭据，仅有指向 `.env` 的说明文字；
+   本节及本文件不含服务器 IP 明文、邮箱地址、姓名、SMTP 账号名与授权码 —— 这些项在本文件中一律以占位符（`<服务器公网 IP>`／`<SMTP 账号>`／`<用户>`）或类别名出现，凭据扫描器的自变量清单亦不落库（2026-10-09 脱敏改造，见 §23）。
+
+## 23. 文档脱敏改造记录（t36，2026-10-09）
+
+- **触发**：t34 在 push 前执行脱敏门禁，`grep -rn "<服务器公网 IP 明文>" notice_digest/ docs/ tests/` 命中本文件 1 处；
+  按 t34 契约「任一失败即停」中止提交，captain 裁定阻断正确 ⇒ 先脱敏、再提交。
+- **本文件原有的 4 类真实值**（均在 t29 及更早的追加内容里）：
+  1. §22.5 的服务器侧运维记录：服务器公网 IP 明文 + 部署私钥文件名 + `root@` 登录写法；
+  2. §8 两条凭据扫描命令内联的模式串：同一 IP 的转义形态、发件邮箱域名、SMTP 账号名、姓名；
+  3. §22.5 receipt 摘录中的 SMTP 账号名前缀（`"to_addr"` 字段）；
+  4. §15 的「本文件不含明文」自检声明与实际内容不符（失真声明）。
+- **处置**：全部改为占位符（`<服务器公网 IP>`／`<SMTP 账号>`／`<用户>`）或类别名；§8 的扫描命令改为引用本地私有清单
+  （示例：环境变量 `ND_DENY_RE`），真值不落库；§15、§22.9 两处失真声明同步修正为与文件实际内容相符。
+- **哈希影响**：本文件内容改变 ⇒ 自身 sha256 改变。§15／§20 中记录的「本文件」历史哈希对应脱敏前的旧版本，属预期；
+  本文件从不在 13 个被冻结的产品/测试文件清单内，故不构成冻结清单失配。
+- **已知局限（本次按要求不改动测试文件）**：`tests/test_integration.py` 的 `SKIP_FILES = {"verify_notes.md"}`
+  使本文件永久不被凭据扫描器覆盖 —— 即真实运维记录可以藏进这个豁免文件而不被发现。这是审计盲区，不是「本文件已被扫过」的证据；
+  后续往本文件追加内容时，提交前必须另跑一次独立 grep 口径（§8 的命令形式）。

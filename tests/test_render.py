@@ -86,27 +86,60 @@ class RenderFixtureTest(unittest.TestCase):
 
     # ② 分节顺序 / 不丢条目
 
-    def test_sections_keep_fixed_order(self):
-        positions = [self.html.index(mark) for mark in ("\u2460", "\u2461", "\u2462", "\u2463", "\u2464")]
-        self.assertEqual(positions, sorted(positions), "五个分节的顺序必须固定为 ①②③④⑤")
-        self.assertIn("今天/明天能去", self.html)
-        self.assertIn("截止提醒", self.html)
-        self.assertIn("本周讲座与学术", self.html)
-        self.assertIn("实习就业", self.html)
-        self.assertIn("其他新通知", self.html)
+    def test_sections_use_native_categories_in_fixed_order(self):
+        # t31：顶级分节 = pkuknow 原生分类（items.category），不再自创五桶
+        for stale in ("今天/明天能去", "截止提醒", "本周讲座与学术", "其他新通知"):
+            self.assertNotIn(stale, self.html, "分节标题不得再用自创桶名")
+            self.assertNotIn(stale, self.plain)
+        positions = [self.html.index(mark + " ") for mark in ("\u2460", "\u2461", "\u2462", "\u2463")]
+        self.assertEqual(positions, sorted(positions), "分节顺序必须按 CATEGORY_ORDER 固定")
+        for mark, title in (
+            ("\u2460", "校园动态"),
+            ("\u2461", "讲座活动"),
+            ("\u2462", "文体活动"),
+            ("\u2463", "未分类"),
+        ):
+            self.assertIn(f"{mark} {title}", self.html)
+            self.assertIn(f"{mark} {title}", self.plain)
+        self.assertNotIn("\u2464", self.html, "样例只有 4 个有内容的分类，不该出现第 5 节")
 
-    def test_sections_route_items_as_designed(self):
+    def test_sections_route_items_by_native_category(self):
         head = lambda title: self.html.index(title)  # noqa: E731
-        self.assertIn("人工智能与法律推理前沿问题学术报告会", self.html[head("今天/明天能去"):head("截止提醒")])
-        self.assertIn("国际交流项目报名通知", self.html[head("截止提醒"):head("本周讲座与学术")])
-        self.assertIn("数字法治前沿系列讲座", self.html[head("本周讲座与学术"):head("实习就业")])
-        self.assertIn("法务与合规实习宣讲会", self.html[head("实习就业"):head("其他新通知")])
+        lecture = self.html[head("\u2461 讲座活动"):head("\u2462 文体活动")]
+        self.assertIn("人工智能与法律推理前沿问题学术报告会", lecture)
+        self.assertIn("数字法治前沿系列讲座", lecture)
+        self.assertIn("刑事诉讼法修改重点问题研讨会", lecture)
+        sports = self.html[head("\u2462 文体活动"):head("\u2463 未分类")]
+        self.assertIn("秋季校园马拉松集合与检录安排", sports)
+        self.assertNotIn("人工智能与法律推理前沿问题学术报告会", sports)
+        # 站点历史取值（奖助通知 / 就业实习 / 招聘信息）不在 13 类内 → 落「未分类」，不另起标题
+        uncategorized = self.html[head("\u2463 未分类"):]
+        self.assertIn("法学院国际交流项目报名通知", uncategorized)
+        self.assertIn("互联网企业 2027 届法务与合规实习宣讲会", uncategorized)
+        self.assertIn("中国政法大学出版社法学编辑岗位招聘公告", uncategorized)
+        for invented in ("奖助通知", "就业实习", "招聘信息"):
+            self.assertNotIn(f"{invented}<span", self.html)
 
-    def test_overflow_items_are_folded_not_dropped(self):
+    def test_all_items_appear_and_no_global_folding(self):
         self.assertEqual(self.html.count('data-nd-item="1"'), 12, "12 条新通知必须全部出现在邮件里")
-        self.assertIn("超出优先展示条数", self.html)
+        self.assertNotIn("超出优先展示条数", self.html, "不再有全局折叠桶")
+        self.assertNotIn("本组还有", self.html, "样例没有超过 20 条的组，不该出现组内超限提示")
         for title in ("图书馆新增数据库试用通知", "校园网出口设备维护通知", "食堂菜品更新", "校医院门诊预约方式变更"):
             self.assertIn(title, self.html)
+            self.assertIn(title, self.plain)
+
+    def test_group_over_limit_is_capped_with_a_tail_note(self):
+        # 同一分类 25 条：展示上限 GROUP_LIMIT=20，超出部分只在组尾提示条数
+        scored, parsed = _items(25)
+        _, _, cfg, now = load_fixture()
+        _, html, _ = render_email(scored, parsed, cfg, now)
+        self.assertEqual(html.count('data-nd-item="1"'), 20, "单组最多展开 20 条")
+        self.assertIn("（20 条）", html)
+        self.assertIn("本组还有 5 条未列出", html)
+        self.assertNotIn("测试通知 20", html, "超限条目本轮不展开")
+        # 提示写在组尾：最后一条被展示的条目之后、本节 </section> 之前
+        self.assertLess(html.index("测试通知 19"), html.index("本组还有 5 条未列出"))
+        self.assertLess(html.index("本组还有 5 条未列出"), html.index("</section>"))
 
     # ③ 条目字段
 
@@ -175,7 +208,7 @@ class RenderFixtureTest(unittest.TestCase):
         self.assertNotIn("<a ", self.plain)
         for title in ("人工智能与法律推理前沿问题学术报告会", "食堂菜品更新与营业时间调整"):
             self.assertIn(title, self.plain)
-        self.assertIn("\u2460 今天/明天能去", self.plain)
+        self.assertIn("\u2460 校园动态", self.plain)
 
     def test_html_to_text_keeps_all_items_and_links(self):
         text = html_to_text(self.html)
@@ -221,6 +254,22 @@ class RenderFixtureTest(unittest.TestCase):
         self.assertNotIn("校医院门诊预约方式变更".encode("utf-8"), raw)
         self.assertIn("人工智能与法律推理前沿问题学术报告会".encode("utf-8"), raw)
 
+    def test_urgency_is_an_item_tag_not_a_section(self):
+        # 紧迫度降级为条目内标签：顶级分节不再有「今天/明天能去」「截止提醒」
+        for stale in ("今天/明天能去", "截止提醒"):
+            self.assertNotIn(stale, self.html)
+        self.assertIn("\u3010\u660e\u5929\u3011", self.html)
+        self.assertIn("\u3010\u622a\u6b62 10-09\u3011", self.html)
+        self.assertIn("\u3010\u660e\u5929\u3011", self.plain)
+        self.assertIn("\u3010\u622a\u6b62 10-09\u3011", self.plain)
+        # 标签挂在条目上：该条目的 <li> 与纯文本元信息行里都能看到
+        forum = self.html[
+            self.html.index("人工智能与法律推理前沿问题学术报告会"):
+            self.html.index("《民法典》合同编通则司法解释理解与适用讲座")
+        ]
+        self.assertIn("\u3010\u660e\u5929\u3011", forum)
+        self.assertIn("\u3010\u660e\u5929\u3011 清华大学法学院", self.plain)
+
 
 class RenderEdgeCaseTest(unittest.TestCase):
     def test_empty_day_returns_sentinel(self):
@@ -228,13 +277,50 @@ class RenderEdgeCaseTest(unittest.TestCase):
         self.assertEqual(render_email([], {}, cfg, now), ("", "", ""))
         self.assertEqual(render_plain_text([], {}, cfg, now), "")
 
-    def test_top_n_zero_means_no_folding(self):
+    def test_top_n_does_not_change_sectioning(self):
+        # top_n 的截断发生在 cli.py 上游（scored[:top_n]）；渲染层不再据此制造折叠桶
         scored, parsed = _items(6)
         _, _, cfg, now = load_fixture()
-        cfg = dataclasses.replace(cfg, top_n=0)
+        _, html_zero, _ = render_email(scored, parsed, dataclasses.replace(cfg, top_n=0), now)
+        _, html_wide, _ = render_email(scored, parsed, dataclasses.replace(cfg, top_n=99), now)
+        self.assertEqual(html_zero.count('data-nd-item="1"'), 6)
+        self.assertEqual(html_wide.count('data-nd-item="1"'), 6)
+        self.assertNotIn("超出优先展示条数", html_zero)
+        self.assertNotIn("超出优先展示条数", html_wide)
+
+    def test_urgency_today_tag_from_bucket_only(self):
+        scored, parsed = _items(1)
+        parsed["x:0"] = ParsedTime(start=None, end=None, deadline=None, bucket="today", evidence="今天")
+        _, _, cfg, now = load_fixture()
         _, html, _ = render_email(scored, parsed, cfg, now)
-        self.assertEqual(html.count('data-nd-item="1"'), 6)
-        self.assertNotIn("超出优先展示条数", html)
+        self.assertIn("\u3010\u4eca\u5929\u3011", html)
+        self.assertIn("时间待定（原文：今天）", html, "解析不出具体时刻时保留原文溯源")
+
+    def test_absent_categories_render_no_empty_section(self):
+        scored, parsed = _items(2)  # 全部 校园动态
+        _, _, cfg, now = load_fixture()
+        _, html, _ = render_email(scored, parsed, cfg, now)
+        self.assertIn("校园动态", html)
+        for absent in ("讲座活动", "实习就业", "奖助评优", "未分类"):
+            self.assertNotIn(f" {absent}<span", html, "没有内容的分类不渲染空节")
+
+    def test_unknown_blank_and_missing_categories_fall_into_uncategorized(self):
+        scored, parsed = _items(3)
+        scored[0].item["category"] = "就业实习"   # 站点历史取值，不属于 13 类
+        scored[1].item["category"] = "   "        # 纯空白
+        del scored[2].item["category"]            # 字段缺失
+        _, _, cfg, now = load_fixture()
+        _, html, _ = render_email(scored, parsed, cfg, now)
+        self.assertIn("未分类", html)
+        self.assertIn("（3 条）", html)
+        self.assertNotIn("就业实习<span", html, "取值不在 13 类内不得自成分节")
+
+    def test_group_members_sorted_by_personalized_score(self):
+        scored, parsed = _items(5)
+        _, _, cfg, now = load_fixture()
+        _, html, _ = render_email(list(reversed(scored)), parsed, cfg, now)
+        order = [html.index(f"测试通知 {i}") for i in range(5)]
+        self.assertEqual(order, sorted(order), "组内必须按个性化分降序，与输入顺序无关")
 
 
 class MailerTest(unittest.TestCase):
