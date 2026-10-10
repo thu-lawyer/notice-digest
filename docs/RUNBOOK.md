@@ -575,4 +575,15 @@ curl -sS -w ' [%{http_code}]\n' https://nd.thulaw.top/nd/f                  # �
 - `tests/test_render.py` 覆盖：原生分类固定顺序、组内按分类归属、缺席分类不渲染空节、未知/空/缺失分类落「未分类」、组内按个性化分降序、超限提示出现在第 20 条之后且位于 `</section>` 之前、`top_n` 不改变分节逻辑、紧迫度只作条目标签、无全局折叠桶。
 - **反证（在项目目录外的副本里注入缺陷，被保护断言必须变红）**：`_group_note` 恒返回空串 → 超限提示断言红；`_urgency_tags` 恒返回空串 → 两条紧迫度断言红；`category_of` 恒返回「未分类」→ 原生分类分节断言红；`group_by_category` 的 `reverse=True` 改 `False` → 组内排序断言红。四项均实测变红、对照组保持绿，断言非空转。
 
+## 20. 部署同步（rsync）规则（2026-10-10 事故后固化，照做）
+
+- **`--delete` 是危险开关**：它会把「本地没有、远端有」的文件删掉。生产机上的运行时数据必须先排除。
+- **同步命令的排除集必须完整包含**（少一条都会出事）：
+  - `--exclude=.venv`（远端 venv 是在 ARM 上重建的，本地覆盖会损坏，此前已踩过）
+  - `--exclude=data/`（远端生产数据库与投递台账。**2026-10-10 因漏掉这一条，`--delete` 删掉了生产 notice.db**，items 历史 / weights / feedback / 投递台账丢失；详见下面的自愈说明）
+  - `--exclude=.env`、`--exclude=state*.json`、`--exclude=__pycache__`、`--exclude=.pytest_cache`、`--exclude=.git`
+- **同步后必做的验证**：`stat <部署目录>/data/notice.db`（mtime 应早于本次同步）；用 `.venv/bin/python` 以 `sqlite3.connect(f"file:{path}?mode=ro", uri=True)` 数 items 行数。服务器没有 sqlite3 CLI；裸 `sqlite3.connect(path)` 会对不存在的路径**静默创建空库**，必须用 `mode=ro` URI。
+- **该事故的自愈原理（无需手工重建台账）**：`last_sent_at()` 在 send_attempts/sends 两表全空时返回 `None` → `items_published_after(None)` 窗口不设上界；但 items 表同时被清空，而 fetch 的增量锚点在 `state.json`（排除集内，未受影响）→ 明晨只回填增量条目并全部进窗口，恰好等于正常发送。真实损失仅：items 历史台账、个性化 weights（可重训）、feedback 记录、投递审计行。
+- `data/t3/` 等测试残留目录是本地开发机带入的，不属生产数据，见到不必惊慌；排除了 `data/` 后不会再出现。
+
 > 脱敏说明：本文档随公开仓库 thu-lawyer/notice-digest 发布，服务器公网 IP 一律以 `<服务器公网 IP>` 占位（域名与端口保持原样，便于对照拓扑）；复现命令时把你实际的服务器 IP 代入即可。
