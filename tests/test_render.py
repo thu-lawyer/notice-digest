@@ -557,7 +557,9 @@ class HygieneTest(unittest.TestCase):
 
         signature = inspect.signature(render.render_email)
         self.assertEqual(
-            list(signature.parameters), ["scored", "parsed", "cfg", "now"], "render_email 签名被契约冻结"
+            list(signature.parameters),
+            ["scored", "parsed", "cfg", "now", "gzh_picked"],
+            "render_email 签名被契约冻结（gzh_picked 为合并邮件扩展，带默认值向后兼容）",
         )
         send_signature = inspect.signature(mailer.send)
         self.assertEqual(

@@ -360,6 +360,50 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        if parsed_url.path == "/nd/ics":
+            # 「+ 日历」按钮：确认参加 = 强正向信号。与 /nd/f 同一条安全链：
+            # kind="ics" 签名校验（渲染层 make_token 不带 exp ⇒ 这里 exp 同样按 None 验）
+            # → 预取过滤 → 幂等记账 → 找条目 → 有明确开始时间才产单事件 .ics。
+            if not item_id or not verify_token(token, item_id, "ics", self.cfg, exp):
+                return self._deny(403, "bad signature")
+            if is_expired(exp):
+                return self._deny(403, "expired")
+            store = self._db()
+            if not prefetch:
+                with _WRITE_LOCK:
+                    record_and_learn(store, self.cfg, item_id, "up", token=token, ua=ua)
+            item = store.get_item(item_id)
+            if item is None:
+                return self._deny(404, "unknown item")
+            # 惰性导入：保持反馈服务冷启动不变，只有真点「+ 日历」才加载解析/渲染层。
+            from .enrich import parsed_for_item
+            from .render import build_single_event_ics
+            from urllib.parse import quote
+
+            parsed = parsed_for_item(item, now_shanghai())
+            if getattr(parsed, "start", None) is None:
+                return self._deny(404, "no parseable start")
+            body = build_single_event_ics(item, parsed, now_shanghai())
+            raw_name = (item.get("title") or "event").strip()[:40] or "event"
+            safe_name = "".join(
+                ch for ch in raw_name if ch not in '\\/:*?"<>|\r\n\t'
+            ) or "event"
+            file_base = f"{safe_name}.ics"
+            try:
+                file_base.encode("ascii")
+                disposition = f'attachment; filename="{file_base}"'
+            except UnicodeEncodeError:
+                # http.server 头部按 latin-1 写出：中文文件名必须走 RFC 5987 filename*
+                disposition = "attachment; filename*=UTF-8''" + quote(file_base)
+            data = body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/calendar; charset=utf-8")
+            self.send_header("Content-Disposition", disposition)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
         if parsed_url.path in ("/nd/health", "/healthz"):
             return self._ok("ok")
 

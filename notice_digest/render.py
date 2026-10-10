@@ -229,7 +229,7 @@ def _feedback_links(item_id: str, cfg: Config):
     if not _squeeze(getattr(cfg, "hmac_secret", "")):
         return None
     try:
-        tokens = {kind: make_token(item_id, kind, cfg) for kind in ("click", "up", "down")}
+        tokens = {kind: make_token(item_id, kind, cfg) for kind in ("click", "up", "down", "ics")}
     except ValueError:
         # make_token 在缺 ND_HMAC_SECRET 时抛 ValueError → 降级为无反馈按钮（开发模式）
         return None
@@ -238,6 +238,7 @@ def _feedback_links(item_id: str, cfg: Config):
         "click": f"{base}/nd/c?{query}&t={tokens['click']}",
         "up": f"{base}/nd/f?{query}&k=up&t={tokens['up']}",
         "down": f"{base}/nd/f?{query}&k=down&t={tokens['down']}",
+        "ics": f"{base}/nd/ics?{query}&t={tokens['ics']}",
     }
 
 
@@ -400,11 +401,19 @@ def _item_html(scored, p, cfg: Config, now: datetime) -> str:
             f'时间待定，原文溯源：{_esc(parts["evidence"])}</div>'
         )
     if parts["links"]:
+        # 「+ 日历」：只有解析出明确开始时间的条目才有（/nd/ics 只服务这类条目）。
+        cal_html = ""
+        if _as_shanghai(getattr(p, "start", None)) is not None:
+            cal_html = (
+                f' \u2571 '
+                f'<a href="{_esc(parts["links"]["ics"])}" style="color:#2b5aa0;text-decoration:none;">+ 日历</a>'
+            )
         rows.append(
             f'<div class="nd-fb" style="margin-top:6px;color:#6b6f6a;font-size:13px;">'
             f'\U0001f44d <a href="{_esc(parts["links"]["up"])}" style="color:#2f6f4f;text-decoration:none;">有用</a>'
             f' \u2571 '
             f'\U0001f44e <a href="{_esc(parts["links"]["down"])}" style="color:#8a5a3b;text-decoration:none;">少推</a>'
+            f"{cal_html}"
             f"</div>"
         )
     # data-nd-item="1" 是**渲染层写死的计数标记**：每个条目都固定写 "1"，只供下游用
@@ -489,27 +498,177 @@ def _render_sections(ordered, parsed, cfg: Config, now: datetime, renderer) -> l
     return chunks
 
 
-def render_email(scored, parsed, cfg: Config, now: datetime) -> tuple[str, str, str]:
+# --------------------------------------------------------------------------- 公众号文章
+
+
+def _article_feedback_links(article, cfg: Config):
+    """公众号文章的 👍/👎 链接：item_id 用 ``gzh-<md5(url)>``，与通知条目 id 空间隔离。
+
+    无 key（理论不发生）/开发模式（无 base 或无 HMAC）返回 None，不渲染按钮。
+    """
+    key = _squeeze((article or {}).get("key")) or ""
+    if not key:
+        return None
+    return _feedback_links(f"gzh-{key}", cfg)
+
+
+# 「今日推荐」节收纳的精选篇数上限；其余仍归「公众号文章」节（锁定设计：前 5 前置）。
+_GZH_RECO_LIMIT = 5
+
+
+def _gzh_items_html(picked, cfg: Config) -> str:
+    """精选条目的 <li> 列表片段（「今日推荐」与「公众号文章」两节共用）。"""
+    items = []
+    for article in picked:
+        title = _squeeze(article.get("title")) or "(无标题)"
+        mp = _squeeze(article.get("mp"))
+        url = _squeeze(article.get("url"))
+        links = _article_feedback_links(article, cfg)
+        rows = []
+        if url.startswith(("http://", "https://")):
+            rows.append(
+                f'<a href="{_esc(url)}" '
+                f'style="color:#1a1a1a;text-decoration:none;font-weight:600;">{_esc(title)}</a>'
+            )
+        else:
+            rows.append(f'<span style="font-weight:600;">{_esc(title)}</span>')
+        extras = ""
+        if links:
+            extras = (
+                f'\U0001f44d <a href="{_esc(links["up"])}" style="color:#2f6f4f;text-decoration:none;">有用</a>'
+                f' \u2571 '
+                f'\U0001f44e <a href="{_esc(links["down"])}" style="color:#8a5a3b;text-decoration:none;">少推</a>'
+            )
+        meta_bits = []
+        if mp:
+            meta_bits.append(_esc(mp))
+        if extras:
+            meta_bits.append(extras)
+        if meta_bits:
+            rows.append(
+                f'<div style="margin-top:2px;color:#6b6f6a;font-size:13px;">{" · ".join(meta_bits)}</div>'
+            )
+        items.append(
+            '<li class="gzh-item" style="margin:0 0 12px;padding:0 0 10px;'
+            'border-bottom:1px solid #eceeeb;list-style:none;">' + "".join(rows) + "</li>"
+        )
+    return "".join(items)
+
+
+def _gzh_top_html(picked, cfg: Config) -> str:
+    """「今日推荐」节：个性化精选前置（用户要求：推荐的放前面）。"""
+    if not picked:
+        return ""
+    return (
+        '<section class="gzh-reco" style="margin:0 0 18px;">'
+        '<h2 style="font-size:16px;margin:0 0 10px;padding-left:8px;border-left:3px solid #2f6f4f;">'
+        f'今日推荐<span style="color:#8a8f89;font-size:13px;font-weight:400;">（AI 精选 {len(picked)} 篇）</span></h2>'
+        '<div style="margin:0 0 10px;color:#8a8f89;font-size:13px;">'
+        "按你的口味挑选；👍/👎 影响后续推荐。</div>"
+        f'<ul style="margin:0;padding:0;">{_gzh_items_html(picked, cfg)}</ul>'
+        "</section>"
+    )
+
+
+def _gzh_section_html(picked, cfg: Config) -> str:
+    """「公众号文章」节：AI 精选，样式与通知分节同族但侧线用棕色区分。"""
+    if not picked:
+        return ""
+    return (
+        '<section class="gzh-section" style="margin:0 0 18px;">'
+        '<h2 style="font-size:16px;margin:0 0 10px;padding-left:8px;border-left:3px solid #8a5a3b;">'
+        f'公众号文章<span style="color:#8a8f89;font-size:13px;font-weight:400;">（AI 精选 {len(picked)} 篇）</span></h2>'
+        '<div style="margin:0 0 10px;color:#8a8f89;font-size:13px;">'
+        "来自关注的公众号，按你的口味挑选；👍/👎 影响后续推荐。</div>"
+        f'<ul style="margin:0;padding:0;">{_gzh_items_html(picked, cfg)}</ul>'
+        "</section>"
+    )
+
+
+def _gzh_items_text(picked) -> str:
+    """精选条目的编号行（两节共用）：序号/来源/标题/原文链接。"""
+    lines = []
+    for index, article in enumerate(picked, 1):
+        mp = _squeeze(article.get("mp")) or "未知公众号"
+        title = _squeeze(article.get("title")) or "(无标题)"
+        lines.append(f"{index}. [{mp}] {title}")
+        url = _squeeze(article.get("url"))
+        if url:
+            lines.append(f"   {url}")
+    return "\n".join(lines)
+
+
+def _gzh_top_text(picked) -> str:
+    """纯文本版「今日推荐」节。"""
+    if not picked:
+        return ""
+    return "\n".join([f"■ 今日推荐（AI 精选 {len(picked)} 篇）", _gzh_items_text(picked)])
+
+
+def _gzh_section_text(picked) -> str:
+    """纯文本版「公众号文章」节（与 HTML 节信息一致：序号/来源/标题/原文链接）。"""
+    if not picked:
+        return ""
+    return "\n".join([f"■ 公众号文章（AI 精选 {len(picked)} 篇）", _gzh_items_text(picked)])
+
+
+def build_gzh_subject(picked, now: datetime) -> str:
+    """通知侧为空、仅剩公众号文章时的主题（保证主题永不为空）。"""
+    return f"{SUBJECT_PREFIX} {now.strftime('%m-%d')}{SEP}公众号精选 {len(picked)} 篇"
+
+
+def render_email(scored, parsed, cfg: Config, now: datetime, gzh_picked=None) -> tuple[str, str, str]:
     """渲染日报，返回 (subject, html, ics_text)。
 
-    当天没有新条目时返回 ``("", "", "")``：调用方必须短路（不发信、台账不记）。
+    ``gzh_picked``：公众号文章 AI 精选列表（gzh_source.rank 已选好的子集）。
+    通知与文章都为空时返回 ``("", "", "")``：调用方必须短路（不发信、台账不记）。
+    旧调用方不传 gzh_picked ⇒ 渲染结果与旧版一致（向后兼容）。
     """
     now = _as_shanghai(_as_datetime(now, datetime.now(SHANGHAI)))
+    gzh_picked = list(gzh_picked or [])
     ordered = sorted(
         list(scored or []),
         key=lambda s: float(getattr(s, "score", 0.0) or 0.0),
         reverse=True,
     )
-    if not ordered:
+    # 锁定设计：有通知时前 5 篇前置为「今日推荐」，其余仍归「公众号文章」（不重复）；
+    # 仅文章、无通知时维持旧版单节布局（此时整封就是推荐，无需再分节）。
+    if ordered and gzh_picked:
+        gzh_top = gzh_picked[:_GZH_RECO_LIMIT]
+        gzh_rest = gzh_picked[_GZH_RECO_LIMIT:]
+    else:
+        gzh_top, gzh_rest = [], gzh_picked
+    if not ordered and not gzh_picked:
         return ("", "", "")
 
     parsed = parsed or {}
-    subject = build_subject(ordered, parsed, now)
+    if ordered:
+        subject = build_subject(ordered, parsed, now)
+        if gzh_picked:
+            subject += f"{SEP}公众号精选 {len(gzh_picked)} 篇"
+    else:
+        subject = build_gzh_subject(gzh_picked, now)
     html_sections = _render_sections(ordered, parsed, cfg, now, _section_html)
     text_sections = _render_sections(ordered, parsed, cfg, now, _section_text)
+    if gzh_top:
+        reco_html = _gzh_top_html(gzh_top, cfg)
+        if reco_html:
+            html_sections.insert(0, reco_html)
+        reco_text = _gzh_top_text(gzh_top)
+        if reco_text:
+            text_sections.insert(0, reco_text)
+    if gzh_rest:
+        gzh_html = _gzh_section_html(gzh_rest, cfg)
+        if gzh_html:
+            html_sections.append(gzh_html)
+        gzh_text = _gzh_section_text(gzh_rest)
+        if gzh_text:
+            text_sections.append(gzh_text)
 
     dev_note = _dev_note(cfg)
     meta_line = build_meta_line(ordered, parsed, now)
+    if gzh_picked:
+        meta_line += f" · 公众号精选 {len(gzh_picked)} 篇"
     footer = build_footer_line(ordered, now)
     banner_html = (
         f'<p class="nd-banner" style="margin:0 0 14px;padding:8px 10px;background:#fdf6e3;'
@@ -616,6 +775,11 @@ def _last_modified(item, fallback: str) -> str:
 # 日期粒度判定：解析器只给当地 00:00、且原文没有任何钟点线索 ⇒ 全天事件。
 # 把「10 月 10 日」当 10 月 10 日 00:00 的定时事件，会让 -PT30M 提醒落到前一天 23:30。
 _CLOCK_HINT = re.compile(r"\d{1,2}\s*[:：]\s*\d{2}|\d{1,2}\s*[点时]")
+# 结构化时间分支会把 ISO 原值写进 evidence（如 2026-10-15T00:00:00+08:00），
+# 其机器钟点不代表原文给了钟点——判日期粒度前先剥掉 ISO 时间戳。
+_ISO_DATETIME_TOKEN = re.compile(
+    r"\d{4}-\d{2}-\d{2}(?:[T ]\d{1,2}:\d{2}(?::\d{2})?(?:[+-]\d{2}:?\d{2}|Z)?)?"
+)
 
 
 def _time_evidence_text(item, p) -> str:
@@ -649,7 +813,8 @@ def is_all_day(p, item=None) -> bool:
             return False  # 结束时间带钟点 ⇒ 定时事件
         if end < start:
             return False
-    return not _CLOCK_HINT.search(_time_evidence_text(item, p))
+    evidence = _ISO_DATETIME_TOKEN.sub(" ", _time_evidence_text(item, p))
+    return not _CLOCK_HINT.search(evidence)
 
 
 def _all_day_end(start: datetime, end: datetime | None) -> datetime:
@@ -844,6 +1009,71 @@ def render_ics(scored, parsed, cfg: Config, now: datetime) -> str:
         lines[header_len:header_len] = list(vtimezone_block(now))
     lines.append("END:VCALENDAR")
 
+    folded = []
+    for line in lines:
+        folded.extend(_fold(line))
+    return "\r\n".join(folded) + "\r\n"
+
+
+def build_single_event_ics(item: dict, parsed, now: datetime) -> str:
+    """单事件日历（反馈服务的 /nd/ics「+ 日历」按钮用）。
+
+    与日报附件同一套 ICS 规矩：CRLF、75 字节折行、定时事件带 VTIMEZONE 与
+    VALARM(-PT30M)、全天事件用 VALUE=DATE + 绝对触发（当天 07:30）。
+    ``parsed.start`` 为 None 时由调用方拦截（本函数不校验，信任网关）。
+    """
+    now = _as_shanghai(_as_datetime(now, datetime.now(SHANGHAI)))
+    title = _squeeze(item.get("title")) or "(未命名日程)"
+    place = _squeeze(location_for_item(item))
+    real_url = _squeeze(item.get("url"))
+    item_id = _squeeze(item.get("id"))
+    start = _as_shanghai(getattr(parsed, "start", None))
+    end = _as_shanghai(getattr(parsed, "end", None))
+    all_day = is_all_day(parsed, item)
+    dtstamp = now.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//thu-lawyer//notice-digest//CN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        f"X-WR-CALNAME:{_ics_esc(SUBJECT_PREFIX)}",
+        f"X-WR-TIMEZONE:{TZID}",
+        "BEGIN:VEVENT",
+        f"UID:{_uid(item_id or title)}",
+        f"DTSTAMP:{dtstamp}",
+    ]
+    needs_tz = False
+    if all_day:
+        lines.append(f"DTSTART;VALUE=DATE:{start.strftime('%Y%m%d')}")
+        lines.append(f"DTEND;VALUE=DATE:{_all_day_end(start, end).strftime('%Y%m%d')}")
+    else:
+        needs_tz = True
+        lines.append(f"DTSTART;TZID={TZID}:{start.strftime('%Y%m%dT%H%M%S')}")
+        if end is not None and end > start:
+            lines.append(f"DTEND;TZID={TZID}:{end.strftime('%Y%m%dT%H%M%S')}")
+    lines.append(f"SUMMARY:{_ics_esc(title)}")
+    if place:
+        lines.append(f"LOCATION:{_ics_esc(place)}")
+    if real_url.startswith(("http://", "https://")):
+        lines.append(f"URL:{real_url}")
+    lines.append("STATUS:CONFIRMED")
+    lines.append("BEGIN:VALARM")
+    if all_day:
+        # 与 render_ics 同款：全天事件不能用相对触发器（会甩到前一天 23:30），
+        # 改用绝对时间 = 当天 07:30（Asia/Shanghai）。
+        fire = (start + timedelta(hours=7, minutes=30)).astimezone(timezone.utc)
+        lines.append(f"TRIGGER;VALUE=DATE-TIME:{fire.strftime('%Y%m%dT%H%M%SZ')}")
+    else:
+        lines.append("TRIGGER:-PT30M")
+    lines.append("ACTION:DISPLAY")
+    lines.append(f"DESCRIPTION:{_ics_esc('提醒：' + title)}")
+    lines.append("END:VALARM")
+    lines.append("END:VEVENT")
+    if needs_tz:
+        lines.extend(vtimezone_block(now))
+    lines.append("END:VCALENDAR")
     folded = []
     for line in lines:
         folded.extend(_fold(line))

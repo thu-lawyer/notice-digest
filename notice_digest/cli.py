@@ -433,12 +433,50 @@ def cmd_send(cfg: Config, args) -> int:
     items = store.items_published_after(window_since, limit=args_limit_default())
     parsed_map = _parse_times(items, now)
     scored = score_mod.score_items(items, store.get_weights(), cfg, now, parsed_map)[:capped]
-    subject, html, ics_text = render_mod.render_email(scored, parsed_map, cfg, now)
+
+    # 公众号文章源（与通知合并为一封邮件）：collect → LLM/兜底排序 → 跨源标题去重。
+    # 通知优先：同标题（归一化后）的文章不进精选，但发送成功后同样记入台账。
+    gzh_mod = None
+    gzh_all: list = []
+    gzh_picked: list = []
+    if getattr(cfg, "gzh_db", ""):
+        try:
+            from . import gzh_source as gzh_mod  # noqa: PLC0415 - 惰性导入，保持 CLI 冷启动
+        except ImportError as exc:
+            print(f"[send] 公众号源模块缺失，本轮不发文章：{exc}", file=sys.stderr)
+        else:
+            try:
+                gzh_all = gzh_mod.collect(cfg)
+                picked_idx = gzh_mod.rank(gzh_all, cfg.gzh_top, cfg)
+                candidates = [gzh_all[i] for i in picked_idx]
+                notice_titles = {
+                    gzh_mod.normalize_title(
+                        (getattr(entry, "item", None) or {}).get("title") or ""
+                    )
+                    for entry in scored
+                }
+                gzh_picked = [
+                    article
+                    for article in candidates
+                    if gzh_mod.normalize_title(article.get("title") or "") not in notice_titles
+                ]
+            except Exception as exc:
+                print(
+                    f"[send] 公众号源采集/排序失败，本轮不发文章：{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                gzh_all, gzh_picked = [], []
+
+    subject, html, ics_text = render_mod.render_email(
+        scored, parsed_map, cfg, now, gzh_picked=gzh_picked
+    )
 
     summary = {
         "sent": False,
         "subject": subject,
         "n_items": len(scored),
+        "n_articles": len(gzh_picked),
+        "n_articles_fresh": len(gzh_all),
         "window_since": window_since,
         "gated": False,
     }
@@ -476,6 +514,16 @@ def cmd_send(cfg: Config, args) -> int:
     summary["sent"] = bool(ok)
     if ok:
         store.mark_sent(day, len(scored), fingerprint)
+        if gzh_all:
+            # 整封邮件成功投递后，把本轮**全部**窗口内新文章（含因跨源去重没上精选的）
+            # 记入公众号台账，避免下一封邮件重复出现；干跑绝不写台账。
+            try:
+                summary["gzh_marked"] = gzh_mod.mark_sent(cfg, gzh_all)
+            except Exception as exc:
+                print(
+                    f"[send] 公众号台账写入失败（下一封会重复带出）：{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
     print(json.dumps(summary, ensure_ascii=False))
     store.close()
     return 0 if ok else 4

@@ -1274,6 +1274,16 @@ class Test07CredentialScan(unittest.TestCase):
     })
     ENV_ONLY_RE = re.compile(ENV_NAMES)
 
+    # 精确豁免（2026-10-10）：LLM 用量/上限参数名是 OpenAI 兼容接口的标准字段
+    # （取值恒为数字，与秘密无关），此前按段匹配「tokens」误伤 gzh_source.py 的
+    # `"max_tokens": 8000`。仅按**全名精确比对**豁免，access_token / auth_tokens /
+    # api_key 等真实凭据名不受影响。已知代价（有意接受）：秘密若恰好存在名为
+    # max_tokens 的键下，本层不再报——现实中不存在这种命名。
+    BENIGN_PARAM_NAMES = frozenset({
+        "max_tokens", "max_completion_tokens", "max_output_tokens",
+        "prompt_tokens", "completion_tokens", "total_tokens",
+    })
+
     CRED_CJK = ("授权码", "密码", "口令", "密钥", "凭据")
     
     _SPLIT = re.compile(r"[_.\-]")
@@ -1339,6 +1349,8 @@ class Test07CredentialScan(unittest.TestCase):
     # ------------------------------------------------------------------ 键名判据
     def _is_credential(self, name):
         """名字是否「承载秘密」。中文标记须结尾；ASCII 词元逐段精确比对（避免 author/monkey）。"""
+        if name.lower() in self.BENIGN_PARAM_NAMES:
+            return False
         if any(name.endswith(m) for m in self.CRED_CJK):
             return True
         if any(m in name for m in self.CRED_CJK) and not name.isascii():
@@ -1408,6 +1420,13 @@ class Test07CredentialScan(unittest.TestCase):
         if self._is_placeholder(value):
             return "pass"
         if value.lower() in self.BOOL_NULL:
+            return "skip"
+        # 自引用放行（2026-10-10）：取值与键名是同一个标识符（字典字面量拿键名
+        # 同名变量当取值、敏感键配同名变量）——那是引用而非字面量，无秘密可言；
+        # 同串字面赋值现实中是开发占位，不是泄露。近形字面量与直配真值不受影响，
+        # 照报。（注释措辞刻意避开「凭据名 赋值 同串」的字面形态，防止本文件
+        # 被 07a 自扫时误命中——1425 行的教训。）
+        if not quoted and value.strip().lower() == name.strip().lower():
             return "skip"
         if not quoted and self.NUMERIC_RE.fullmatch(value) and not self._last_segment_is_cred(name):
             return "skip"

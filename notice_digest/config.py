@@ -60,6 +60,14 @@ class Config:
     retries: int = 3
     pages: int = 8
 
+    # --- 公众号文章源（gzh_source；全部缺省=该源关闭，行为与旧版完全一致） ---
+    gzh_db: str = ""             # we-mp-rss 只读 SQLite（ND_GZH_DB）
+    gzh_state: str = ""          # 已发送台账（ND_GZH_STATE；缺省用 <gzh_db 同目录>/state-gzh.json）
+    gzh_top: int = 10            # LLM 精选篇数（ND_GZH_TOP）
+    gzh_lookback: int = 26       # 增量窗口小时数（ND_GZH_LOOKBACK）
+    gzh_zhipu_api_key: str = ""  # 智谱 API key（ND_ZHIPU_API_KEY）
+    gzh_llm_model: str = ""      # 智谱模型名（ND_LLM_MODEL）
+
     def clamp_top_n(self, value: int | None = None) -> int:
         n = self.top_n if value is None else value
         try:
@@ -328,6 +336,12 @@ def load_config(
         keywords_mute=_as_list(profile.get("keywords_mute"), default_keywords_mute()),
         source_boost=_as_dict(profile.get("source_boost"), default_source_boost()),
         sections=_as_list(profile.get("sections"), DEFAULT_SECTIONS),
+        gzh_db=opt("ND_GZH_DB", ""),
+        gzh_state=opt("ND_GZH_STATE", ""),
+        gzh_top=_as_int(opt("ND_GZH_TOP", ""), 10),
+        gzh_lookback=_as_int(opt("ND_GZH_LOOKBACK", ""), 26),
+        gzh_zhipu_api_key=opt("ND_ZHIPU_API_KEY", ""),
+        gzh_llm_model=opt("ND_LLM_MODEL", ""),
         smtp_user=opt("ND_SMTP_USER", _as_str(smtp.get("user"), "")),
         smtp_pass=opt("ND_SMTP_PASS", ""),
         smtp_ssl=bool(smtp.get("ssl", True)),
