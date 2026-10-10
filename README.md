@@ -1,47 +1,45 @@
 # thu-push
 
-把校园通知聚合站的内容，做**二次加工 + 个性化排序**后，每天定时邮件推送给你（附带 ICS 日历附件）。
+把经**微信读书接口**订阅抓取的公众号新文章，做 **AI 精选排序**后，每天定时邮件推送给你。
 
-站点本身只给「标题 + 摘要 + 一句自由文本时间」；本工具补上中文时间解析、事件抽取、分区归类和按个人偏好排序，并支持用邮件里的 👍/👎 按钮持续调整个性化权重。
+抓取与入库由自托管引擎 [rachelos/we-mp-rss](https://github.com/rachelos/we-mp-rss) 完成（经微信读书接口订阅公众号、定时增量同步）；本工具**只读**引擎数据库，在其上补齐 AI 精选、跨源去重、邮件渲染与幂等投递。
 
-> 2026-10 起本仓库由 notice-digest 更名为 **thu-push**，并整体并入原独立仓库 weread-push（微信公众号订阅与每日邮件摘要工具链，见 [`weread-push/`](weread-push/) 子目录，其文档独立维护）。
+> 2026-10 起本仓库由 notice-digest 更名为 **thu-push**，并整体并入原独立仓库 weread-push（微信公众号订阅导入与引擎运维工具链，见 [`weread-push/`](weread-push/) 子目录，其文档独立维护）。
+>
+> 数据源沿革：早期版本基于 pkuknow.cn 校园通知聚合站做「通知日报」；**现已不再从聚合站取数**，数据全部来自微信读书接口（见 §2）。原通知链路（`fetch` / `enrich` / 个性化反馈）作为可选组件保留。
 
 ---
 
 ## 1. 它做什么
 
-流水线五步：
-
 ```
-fetch → enrich → score → render → send
-（抓列表）（抓详情+时间解析）（个性化打分）（HTML+ICS）（SMTP 投递）
+we-mp-rss 引擎（微信读书接口订阅，定时增量抓取入库）
+        ↓  只读 SQLite（ND_GZH_DB，以 file:...?mode=ro 打开，绝不写入引擎库）
+gzh_source 取增量（回看窗口 ND_GZH_LOOKBACK，默认 26 小时）
+        ↓  智谱 LLM 精选排序（取前 ND_GZH_TOP 篇；LLM 失败 → 内置关键词权重表兜底）
+跨源去重（与本地通知库按归一化标题比对，同名 → 通知优先）
+        ↓
+render（HTML 邮件；通知侧另产 .ics 日历附件）  →  send（SMTP 投递 + 幂等闸门）
 ```
 
-- **fetch**：分页抓取列表，按 id 去重入库（站点无日期区间参数，增量只能靠分页 + 去重）。
-- **enrich**：对未加工的条目逐个请求详情端点，解析中文时间文本 → 结构化时间/地点/截止日期。
-- **score**：分类 + 关键词 + 来源 + 紧迫度加权打分，按分区（今天/明天/本周/…）排序。
-- **render**：生成 HTML 邮件与 `.ics` 日历附件（含提前提醒）。
-- **send**：SMTP 投递，并写投递台账（同日同内容有幂等闸门，防重复发信）。
+- **gzh_source**：公众号文章源。文章按 URL 的 md5 记入独立台账（`state-gzh.json`，与通知侧台账互不影响），**发信成功后才记账** —— 重复运行、中途失败都不会把同一篇推两次。
+- **排序**：调用智谱 LLM 从候选中选出每日精选；LLM 不可用时自动降级为内置关键词权重表（讲座、法学、AI、清华等），投递不会因 LLM 故障中断。
+- **跨源去重**：公众号文章与本地通知条目按归一化标题比对，同一内容只出现一次。
+- **send**：SMTP 投递；同日同内容有幂等闸门，防重复发信。
 
-另有 `feedback-serve`：一个只监听回环地址的反馈服务，接收邮件里的 👍/👎 点击。
+另有 `feedback-serve`：只监听回环地址的反馈服务，接收邮件里的 👍/👎 点击。
 
 ---
 
 ## 2. 数据来源与抓取礼仪
 
-- **数据源**：`pkuknow.cn`（清华校内通知聚合站）。校区由 URL 路径前缀选择：`/thu/` 清华、`/ruc/` 人大。
-- **已知接口约束**（实测，2026-10）：
-  - `page_size` 参数被忽略，**固定每页 30 条**；
-  - 页数会漂移，**不能用固定页数判断收敛**，只能用「整页已知 / 与上页 id 重复 / 触顶」三个条件；
-  - 所有日期区间参数无效；
-  - **列表载荷不带时间文本**，时间只能从**详情**端点取。
-- **抓取礼仪**：
-  - 详情端点按 **1 req/s** 限速，脚本内已实现，请勿调高；
-  - 列表只抓增量所需页数（默认 8 页 = 240 条，远超实际日增）；
-  - 使用带联系方式的 User-Agent，便于站点在流量异常时联系；
-  - 不做并发爆破、不绕过站点访问控制、不抓取与通知无关的接口；
-  - **本工具是个人自用聚合器**，请遵守站点条款与 robots 约定；如需大规模使用请先取得站点许可。
-- **站点读取门槛**：站点要求先建立访客会话（首次请求返回 403 + `Set-Cookie`）。若遇到持续 403 且响应体为 `READ_SESSION_REQUIRED`，说明客户端没有携带/复用会话 Cookie —— 见 `docs/RUNBOOK.md` 的排查章节。
+- **当前数据源：微信读书接口（经 we-mp-rss 引擎）**
+  - 引擎自托管，并自行维护微信读书登录态；本仓库不存储、不经手任何微信凭据。
+  - 本工具对引擎数据库**只读**（`file:...?mode=ro`），不直接请求任何微信接口；抓取频率与礼仪由引擎侧控制。
+  - 增量窗口默认 26 小时；每封邮件精选篇数默认 10（`ND_GZH_TOP`）。
+- **订阅导入礼仪**（`weread-push/import/mp_searchbiz.py`）：通过微信 `searchbiz` 接口批量发现公众号（CDP 真实浏览器通道），**≥ 2.5 秒/次限速**、幂等去重；仅用于订阅导入，不做并发请求。
+- **订阅清单**：132 个公众号见 [`weread-push/feeds/feeds-132.json`](weread-push/feeds/feeds-132.json)（仅公开名称与公开 biz 标识，无隐私数据）。
+- **历史数据源（已停用）**：pkuknow.cn 校园通知聚合站。其接口约束与抓取礼仪的实测记录保留在 `docs/RUNBOOK.md`；`fetch` / `enrich` 子命令仍可运行，作为可选的通知补充源。
 
 ---
 
@@ -51,7 +49,7 @@ fetch → enrich → score → render → send
 
 ```bash
 git clone https://github.com/thu-lawyer/thu-push.git
-cd notice-digest
+cd thu-push
 
 python3 -m venv .venv
 .venv/bin/python -m pip install -U pip
@@ -78,17 +76,23 @@ cp .env.example .env && chmod 0600 .env   # 然后手工填入 SMTP 账号与授
 | `ND_SMTP_PORT` | 端口，465 = SSL 直连 |
 | `ND_SMTP_USER` | SMTP 登录账号 |
 | `ND_SMTP_PASS` | SMTP 授权码（**唯一必须手工填的敏感项**） |
+| `ND_GZH_DB` | we-mp-rss 引擎 SQLite 路径（**配置后公众号源启用**；留空则只走通知链路） |
+| `ND_GZH_STATE` | 公众号已发送台账路径（缺省 = `ND_GZH_DB` 同目录的 `state-gzh.json`） |
+| `ND_GZH_TOP` | 每封邮件 AI 精选篇数（默认 10） |
+| `ND_GZH_LOOKBACK` | 公众号增量回看窗口，小时（默认 26） |
+| `ND_ZHIPU_API_KEY` | 智谱 API key（公众号排序用；缺省 → 关键词兜底，不影响投递） |
+| `ND_LLM_MODEL` | 智谱模型名（公众号排序用） |
 | `ND_FEEDBACK_BASE` | 反馈入口的公网基址（留空 → 反馈按钮不渲染） |
 | `ND_HMAC_SECRET` | 反馈链接签名密钥（未配置 → 反馈服务拒绝启动） |
 
 > 注意：配置读取**只认 `ND_*` 前缀**，`SMTP_*` 之类的别名不被识别。
 > 生产环境必须同时设置 `ND_FEEDBACK_BASE` 与 `ND_HMAC_SECRET`，否则邮件里不会出现 👍/👎 按钮（属于安全降级，不报错）。
 
-### 4.2 `profile.yaml`（个性化与行为配置）
+### 4.2 `profile.yaml`（通知侧个性化与行为配置）
 
 | 键 | 说明 |
 | --- | --- |
-| `campus` | 校区，`thu` / `ruc` |
+| `campus` | 校区，`thu` / `ruc`（通知链路用） |
 | `top_n` | 邮件展示条数 |
 | `sections` | 分区顺序 |
 | `weights_prior` | 冷启动先验权重（也是在线学习的初值） |
@@ -99,29 +103,37 @@ cp .env.example .env && chmod 0600 .env   # 然后手工填入 SMTP 账号与授
 
 完整可抄的样例见 **`profile.example.yaml`**（内含推荐的文体/讲座/比赛/法学/AI 加权先验）。
 
+公众号文章的排序由 LLM 精选与内置关键词表承担，**不读 `profile.yaml`**。
+
 ---
 
 ## 5. 手工运行
 
 ```bash
-# 抓取（默认 8 页）
-.venv/bin/python -m notice_digest.cli fetch --pages 30
-
-# 加工详情（1 req/s 限速，条数越多越慢）
-.venv/bin/python -m notice_digest.cli enrich --limit 120
-
-# 看打分结果（不带 --id 则看 Top N）
-.venv/bin/python -m notice_digest.cli explain --top 20
-.venv/bin/python -m notice_digest.cli explain --id <条目id>
-
-# 权重与统计概览
-.venv/bin/python -m notice_digest.cli stats
+# ── 公众号源（当前主链路，无需先 fetch/enrich）──
 
 # 只渲染不发送（干跑：写文件、不落台账、不触发闸门）
 .venv/bin/python -m notice_digest.cli send --dry-run
 
 # 真实投递
 .venv/bin/python -m notice_digest.cli send
+
+# ── 通知链路（历史源，可选）──
+
+# 抓取列表（分页 + 按 id 去重增量）
+.venv/bin/python -m notice_digest.cli fetch --pages 30
+
+# 加工详情（1 req/s 限速，条数越多越慢）
+.venv/bin/python -m notice_digest.cli enrich --limit 120
+
+# ── 通用 ──
+
+# 权重与统计概览
+.venv/bin/python -m notice_digest.cli stats
+
+# 逐条归因：某条为什么排在前面
+.venv/bin/python -m notice_digest.cli explain --top 20
+.venv/bin/python -m notice_digest.cli explain --id <条目id>
 
 # 反馈服务（生产由 systemd 托管）
 .venv/bin/python -m notice_digest.cli feedback-serve --host 127.0.0.1 --port 8791
@@ -131,7 +143,7 @@ cp .env.example .env && chmod 0600 .env   # 然后手工填入 SMTP 账号与授
 
 | 码 | 含义 |
 | --- | --- |
-| 0 | 成功（含「可自愈的偏差」） |
+| 0 | 成功（含「可自愈的偏差」与「窗口内无新内容」的空投递） |
 | 3 | 致命：重试后仍 5xx / 返回非 JSON / 结构漂移 / 首页为空（会发失败通知邮件） |
 | 4 | 发送失败 |
 
@@ -150,6 +162,8 @@ cp .env.example .env && chmod 0600 .env   # 然后手工填入 SMTP 账号与授
 | `notice-feedback.service` | 反馈服务，只监听 `127.0.0.1:8791` |
 | `nginx-notice-digest.conf` | vhost：`location /nd/` 反代 + `limit_req` 限流 |
 | `nginx-notice-digest-ratelimit.conf` | http 段的 `limit_req_zone`（nginx 要求该指令只能在 http 上下文） |
+
+> 仓库默认 unit 的前两段 `ExecStart` 是 `fetch` / `enrich`（通知链路）。只用公众号源时删去这两行、只保留 `send` 即可 —— 公众号源不经过这两个步骤。
 
 一键部署：
 
@@ -174,11 +188,13 @@ sudo systemctl enable --now notice-feedback.service
 systemctl list-timers notice-digest.timer --no-pager
 ```
 
-运维细节（nginx 反代、备份、故障排查、数据源约束、残余风险）见 **`docs/RUNBOOK.md`**。
+运维细节（nginx 反代、备份、故障排查、数据源实测记录、残余风险）见 **`docs/RUNBOOK.md`**。
 
 ---
 
-## 7. 个性化如何随时间自我调整
+## 7. 通知条目的个性化如何随时间自我调整
+
+（作用于通知链路打分；公众号文章的排序由 LLM 精选承担，不参与下述权重学习。）
 
 三路反馈信号，全部汇入同一个**带上下界的在线 SGD**：
 
@@ -213,12 +229,12 @@ systemctl list-timers notice-digest.timer --no-pager
 ## 8. 目录结构
 
 ```
-notice_digest/     抓取 / 时间解析 / 打分 / 渲染 / 投递 / 反馈服务
-weread-push/       原独立仓库 weread-push 原样并入（公众号订阅导入、增量抓取、gzhmail 每日摘要）
+notice_digest/     主流水线：gzh_source 公众号源、渲染、投递、反馈服务；fetch/enrich/score 为通知链路（历史源）
+weread-push/       微信读书接口工具链：searchbiz 订阅导入、引擎运维 RUNBOOK、gzhmail 独立日报脚本、132 订阅清单
 deploy/            systemd 单元、nginx 片段、安装脚本
-docs/              RUNBOOK（部署与运维手册）、修复记录
+docs/              RUNBOOK（部署与运维手册，含两个数据源的实测记录）、修复记录
 tests/             单元与集成测试（标准库 unittest）
-data/              运行期数据（数据库、渲染产物）—— 已被 .gitignore 整体排除
+data/              运行期数据（数据库、台账、渲染产物）—— 已被 .gitignore 整体排除
 ```
 
 ---
