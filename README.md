@@ -1,8 +1,10 @@
-# notice-digest
+# thu-push
 
 把校园通知聚合站的内容，做**二次加工 + 个性化排序**后，每天定时邮件推送给你（附带 ICS 日历附件）。
 
 站点本身只给「标题 + 摘要 + 一句自由文本时间」；本工具补上中文时间解析、事件抽取、分区归类和按个人偏好排序，并支持用邮件里的 👍/👎 按钮持续调整个性化权重。
+
+> 2026-10 起本仓库由 notice-digest 更名为 **thu-push**，并整体并入原独立仓库 weread-push（微信公众号订阅与每日邮件摘要工具链，见 [`weread-push/`](weread-push/) 子目录，其文档独立维护）。
 
 ---
 
@@ -48,7 +50,7 @@ fetch → enrich → score → render → send
 依赖极简：**Python 标准库 + `requests`**。
 
 ```bash
-git clone https://github.com/thu-lawyer/notice-digest.git
+git clone https://github.com/thu-lawyer/thu-push.git
 cd notice-digest
 
 python3 -m venv .venv
@@ -212,6 +214,7 @@ systemctl list-timers notice-digest.timer --no-pager
 
 ```
 notice_digest/     抓取 / 时间解析 / 打分 / 渲染 / 投递 / 反馈服务
+weread-push/       原独立仓库 weread-push 原样并入（公众号订阅导入、增量抓取、gzhmail 每日摘要）
 deploy/            systemd 单元、nginx 片段、安装脚本
 docs/              RUNBOOK（部署与运维手册）、修复记录
 tests/             单元与集成测试（标准库 unittest）

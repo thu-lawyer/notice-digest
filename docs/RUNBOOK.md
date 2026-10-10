@@ -582,8 +582,9 @@ curl -sS -w ' [%{http_code}]\n' https://nd.thulaw.top/nd/f                  # �
   - `--exclude=.venv`（远端 venv 是在 ARM 上重建的，本地覆盖会损坏，此前已踩过）
   - `--exclude=data/`（远端生产数据库与投递台账。**2026-10-10 因漏掉这一条，`--delete` 删掉了生产 notice.db**，items 历史 / weights / feedback / 投递台账丢失；详见下面的自愈说明）
   - `--exclude=.env`、`--exclude=state*.json`、`--exclude=__pycache__`、`--exclude=.pytest_cache`、`--exclude=.git`
+  - `--exclude=weread-push/`（2026-10 并入仓库的 weread 子目录，仅本地使用，不部署到生产机）
 - **同步后必做的验证**：`stat <部署目录>/data/notice.db`（mtime 应早于本次同步）；用 `.venv/bin/python` 以 `sqlite3.connect(f"file:{path}?mode=ro", uri=True)` 数 items 行数。服务器没有 sqlite3 CLI；裸 `sqlite3.connect(path)` 会对不存在的路径**静默创建空库**，必须用 `mode=ro` URI。
 - **该事故的自愈原理（无需手工重建台账）**：`last_sent_at()` 在 send_attempts/sends 两表全空时返回 `None` → `items_published_after(None)` 窗口不设上界；但 items 表同时被清空，而 fetch 的增量锚点在 `state.json`（排除集内，未受影响）→ 明晨只回填增量条目并全部进窗口，恰好等于正常发送。真实损失仅：items 历史台账、个性化 weights（可重训）、feedback 记录、投递审计行。
 - `data/t3/` 等测试残留目录是本地开发机带入的，不属生产数据，见到不必惊慌；排除了 `data/` 后不会再出现。
 
-> 脱敏说明：本文档随公开仓库 thu-lawyer/notice-digest 发布，服务器公网 IP 一律以 `<服务器公网 IP>` 占位（域名与端口保持原样，便于对照拓扑）；复现命令时把你实际的服务器 IP 代入即可。
+> 脱敏说明：本文档随公开仓库 thu-lawyer/thu-push 发布（原 notice-digest，2026-10 更名），服务器公网 IP 一律以 `<服务器公网 IP>` 占位（域名与端口保持原样，便于对照拓扑）；复现命令时把你实际的服务器 IP 代入即可。
